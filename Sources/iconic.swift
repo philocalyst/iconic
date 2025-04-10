@@ -9,6 +9,8 @@ enum ColorScheme: String, ExpressibleByArgument, CaseIterable {
 	case auto, light, dark
 }
 
+let resourcesPath = "/Users/philocalyst/.local/share/"
+
 enum IconAssignmentError: Error, CustomStringConvertible {
 	case missingArgument(description: String)
 	case invalidImage(path: String)
@@ -450,6 +452,8 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 			logger.info("Loading input image from \(mask)")
 			let maskImage = try Iconic.createImage(imagePath: mask)
+			let folderImage = try Iconic.createImage(
+				imagePath: determineBasePath(version: "bigsur", color: colorScheme))
 
 			if options.verbose {
 				logger.debug("Image loaded successfully")
@@ -531,6 +535,40 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		} catch {
 			logger.error("Error in MaskIcon: \(error)")
 			print("Error: \(error)")
+		}
+	}
+	@MainActor
+	@preconcurrency
+
+	@MainActor
+	@preconcurrency
+	func determineBasePath(version: String, color: ColorScheme) -> String {
+		let type = "folder"
+		var swatch: String
+		if color == ColorScheme.auto {
+			if isDarkMode() {
+				swatch = "dark"
+			} else {
+				swatch = "light"
+			}
+		} else {
+			if color == ColorScheme.dark {
+				swatch = "dark"
+			} else {
+				swatch = "light"
+			}
+		}
+		print("\(resourcesPath)\(version)-\(type)-\(swatch).icns")
+		return "\(resourcesPath)\(version)-\(type)-\(swatch).icns"
+	}
+	@MainActor
+	@preconcurrency
+	func isDarkMode() -> Bool {
+		// Use bestMatch to determine if the closest standard appearance is darkAqua.
+		if NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+			return true
+		} else {
+			return false
 		}
 	}
 }
