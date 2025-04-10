@@ -13,6 +13,7 @@ let resourcesPath = "/Users/philocalyst/.local/share/"
 
 enum IconAssignmentError: Error, CustomStringConvertible {
 	case missingArgument(description: String)
+	case filterFailure(filter: String)
 	case invalidImage(path: String)
 	case invalidIconPath(path: String, reason: String)
 	case invalidImageExtent(operation: String, reason: String)
@@ -44,6 +45,8 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 			return "An unexpected error occurred: \(message)"
 		case .iconGetFailed(let path, let reason):
 			return "Failed to get icon from path '\(path)': \(reason)"
+		case .filterFailure(let filter):
+			return "Failed to apply filter \(filter)"
 		case .invalidImageExtent(let operation, let reason):
 			return
 				"Image processing operation '\(operation)' failed due to invalid geometry: \(reason)"
