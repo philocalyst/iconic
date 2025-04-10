@@ -145,7 +145,7 @@ struct Iconic: @preconcurrency ParsableCommand {
 
 	@MainActor
 	@preconcurrency
-	static func createImage(susImage: String?) throws -> NSImage {
+	static func createImage(imagePath: String?) throws -> NSImage {
 		// Validate base path
 		let imageURL: URL
 		do {
