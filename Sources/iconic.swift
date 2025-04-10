@@ -455,6 +455,15 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 			let folderImage = try Iconic.createImage(
 				imagePath: determineBasePath(version: "bigsur", color: colorScheme))
 
+			let maskIcons = getAllCIImages(from: maskImage)
+			let folderIcons = getAllCIImages(from: folderImage)
+
+			var convertedIcons: [CIImage] = []
+
+			for (mask, folder) in zip(maskIcons, folderIcons) {
+				convertedIcons.append(iconify(mask: mask, base: folder))
+			}
+
 			if options.verbose {
 				logger.debug("Image loaded successfully")
 				print("Image loaded successfully")
@@ -487,6 +496,16 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				quietPrint(
 					"Saving masked icon as iconset to \(iconsetPath)", isQuiet: options.quiet)
 
+				var index = 0
+				for convertedIcon in convertedIcons {
+					let icnsURL = URL(fileURLWithPath: iconsetPath + String(index))
+					let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+					let context = CIContext()
+					try context.writeJPEGRepresentation(
+						of: convertedIcon, to: icnsURL,
+						colorSpace: colorSpace)
+					index += 1
+				}
 				// Logic to save as .iconset
 			}
 
@@ -537,8 +556,24 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 			print("Error: \(error)")
 		}
 	}
+
 	@MainActor
 	@preconcurrency
+	func getAllCIImages(from nsImage: NSImage) -> [CIImage] {
+		// Iterate through all the representations, $0 represents the current.
+		// Mutate into bitmap representation.
+		// Assuming the cast succeeds, get the cgimage property.
+		// Unwrap the cgImage and init the CIImage using the current prop
+		return nsImage.representations.compactMap {
+			($0 as? NSBitmapImageRep)?.cgImage.flatMap { CIImage(cgImage: $0) }
+		}
+	}
+
+	@MainActor
+	@preconcurrency
+	func iconify(mask: CIImage, base: CIImage) -> CIImage {
+		return mask.composited(over: base)
+	}
 
 	@MainActor
 	@preconcurrency
