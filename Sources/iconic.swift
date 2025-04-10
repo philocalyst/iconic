@@ -149,8 +149,8 @@ struct Iconic: @preconcurrency ParsableCommand {
 		// Validate base path
 		let imageURL: URL
 		do {
-			logger.debug("Attempting to create image from path: \(susImage ?? "<nil>")")
-			imageURL = try validPath(susPath: susImage)
+			logger.debug("Attempting to create image from path: \(imagePath ?? "<nil>")")
+			imageURL = try validPath(susPath: imagePath)
 			guard let inputImg = NSImage(contentsOf: imageURL) else {
 				logger.error("Failed to load image at \(imageURL.path)")
 				print("Error: Could not load image or invalid image format at \(imageURL.path)")
@@ -161,7 +161,7 @@ struct Iconic: @preconcurrency ParsableCommand {
 		} catch {
 			logger.error("Error creating image: \(error)")
 			print(error)
-			throw IconAssignmentError.invalidImage(path: susImage ?? "unknown")
+			throw IconAssignmentError.invalidImage(path: imagePath ?? "unknown")
 		}
 	}
 
@@ -449,7 +449,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 			}
 
 			logger.info("Loading input image from \(mask)")
-			let inputImage = try Iconic.createImage(susImage: mask)
+			let maskImage = try Iconic.createImage(imagePath: mask)
 
 			if options.verbose {
 				logger.debug("Image loaded successfully")
