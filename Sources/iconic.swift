@@ -15,6 +15,7 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 	case missingArgument(description: String)
 	case invalidImage(path: String)
 	case invalidIconPath(path: String, reason: String)
+	case invalidImageExtent(operation: String, reason: String)
 	case invalidTargetPath(path: String, reason: String)
 	case iconLoadFailed(path: String)
 	case iconSetFailed(path: String, reason: String)
@@ -43,6 +44,9 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 			return "An unexpected error occurred: \(message)"
 		case .iconGetFailed(let path, let reason):
 			return "Failed to get icon from path '\(path)': \(reason)"
+		case .invalidImageExtent(let operation, let reason):
+			return
+				"Image processing operation '\(operation)' failed due to invalid geometry: \(reason)"
 		}
 	}
 }
@@ -462,11 +466,11 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 			if maskIcons.count == folderIcons.count {
 				for (mask, folder) in zip(maskIcons, folderIcons) {
-					convertedIcons.append(iconify(mask: mask, base: folder))
+					try convertedIcons.append(iconify(mask: mask, base: folder))
 				}
 			} else {
 				for base in folderIcons {
-					convertedIcons.append(iconify(mask: maskIcons[0], base: base))
+					try convertedIcons.append(iconify(mask: maskIcons[0], base: base))
 				}
 			}
 
@@ -577,8 +581,46 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 	@MainActor
 	@preconcurrency
-	func iconify(mask: CIImage, base: CIImage) -> CIImage {
-		return mask.composited(over: base)
+	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
+		let baseExtent = base.extent
+		let maskExtent = mask.extent
+
+		print(baseExtent, maskExtent)
+
+		guard !baseExtent.isInfinite, !baseExtent.isEmpty,
+			!maskExtent.isInfinite, !maskExtent.isEmpty
+		else {
+			throw IconAssignmentError.invalidImageExtent(
+				operation: "Center and Composite Image",
+				reason: "Base or mask image has an infinite or empty extent."
+			)
+		}
+
+		// Calculate the translation required to center
+		let targetX = baseExtent.origin.x + (baseExtent.width - maskExtent.width) / 2.0
+		let targetY = baseExtent.origin.y + (baseExtent.height - maskExtent.height) / 2.0
+		let translateX = targetX - maskExtent.origin.x
+		let translateY = targetY - maskExtent.origin.y
+		let transform = CGAffineTransform(translationX: translateX, y: translateY)
+
+		print(targetX, targetY, translateX, translateY)
+
+		let translatedMask = mask.transformed(by: transform)
+
+		guard let multiplyFilter = CIFilter(name: "CIMultiplyCompositing") else {
+			print("Error: Could not create CIMultiplyCompositing filter. Returning base image.")
+			return base  // Return base as fallback
+		}
+
+		multiplyFilter.setValue(translatedMask, forKey: kCIInputImageKey)  // Foreground
+		multiplyFilter.setValue(base, forKey: kCIInputBackgroundImageKey)  // Background
+
+		guard let outputImage = multiplyFilter.outputImage else {
+			print("Error: Filter did not produce an output image. Returning base image.")
+			return base
+		}
+
+		return translatedMask.composited(over: base)
 	}
 
 	@MainActor
