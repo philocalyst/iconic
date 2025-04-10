@@ -14,6 +14,8 @@ let resourcesPath = "/Users/philocalyst/.local/share/"
 enum IconAssignmentError: Error, CustomStringConvertible {
 	case missingArgument(description: String)
 	case imageConversionFailed(description: String)
+	case invalidSourceSize
+	case invalidTargetDimensions
 	case missingAlpha(description: String)
 	case filterFailure(filter: String)
 	case cliExecutionFailed(command: String, exitCode: Int32, errorOutput: String)
@@ -70,6 +72,8 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 		case .invalidImageExtent(let operation, let reason):
 			return
 				"Image processing operation '\(operation)' failed due to invalid geometry: \(reason)"
+		default:
+			return "Failed"
 		}
 	}
 }
@@ -612,7 +616,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		let cropped_base = try cropTransparentPadding(image: base)
 
 		let resizedMask = try resizeImage(
-			cropped_mask, toTargetSize: CGSize(width: 768, height: 384))
+			cropped_mask, toTargetRatio: 0.5, baseDimension: cropped_base.extent.size)
 
 		let centeredMask = try centerImage(mask: resizedMask, overBase: cropped_base)
 
@@ -651,24 +655,47 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		return mask.transformed(by: transform)
 	}
 
-	func resizeImage(_ image: CIImage, toTargetSize targetSize: CGSize) throws -> CIImage {
+	func resizeImage(_ image: CIImage, toTargetRatio targetRatio: CGFloat, baseDimension: CGSize)
+		throws -> CIImage
+	{
 		guard let resizeFilter = CIFilter(name: "CILanczosScaleTransform") else {
 			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform")
 		}
 
-		// Calculate appropriate scale factor to maintain aspect ratio
 		let sourceSize = image.extent.size
-		let scaleX = targetSize.width / sourceSize.width
-		let scaleY = targetSize.height / sourceSize.height
-		let scale = min(scaleX, scaleY)
+		guard sourceSize.width > 0 && sourceSize.height > 0 else {
+			print("Warning: Input image has zero dimensions. Returning original image.")
+			throw IconAssignmentError.invalidSourceSize
+		}
 
-		// Apply scaling filter
+		let targetSize = CGSize(
+			width: baseDimension.width * targetRatio,
+			height: baseDimension.height * targetRatio)
+
+		guard targetSize.width > 0 && targetSize.height > 0 else {
+			// Handle cases where baseDimension or targetRatio results in zero target size
+			throw IconAssignmentError.invalidTargetDimensions
+		}
+
+		//    The image should fit *within* the targetSize.
+		let widthRatio = targetSize.width / sourceSize.width
+		let heightRatio = targetSize.height / sourceSize.height
+		// Use the *minimum* ratio to ensure the scaled image fits within the target bounds
+		let scale = min(widthRatio, heightRatio)
+
+		// Ensure scale is positive
+		guard scale > 0 else {
+			// Only really possible if you have a non-positive input value
+			throw IconAssignmentError.invalidTargetDimensions
+		}
+
 		resizeFilter.setValue(image, forKey: kCIInputImageKey)
 		resizeFilter.setValue(scale, forKey: kCIInputScaleKey)
+		// Aspect ratio needs to be one for even scaling
 		resizeFilter.setValue(1.0, forKey: kCIInputAspectRatioKey)
 
 		guard let resizedImage = resizeFilter.outputImage else {
-			throw IconAssignmentError.filterFailure(filter: "Resize")
+			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform_Output")
 		}
 
 		return resizedImage
