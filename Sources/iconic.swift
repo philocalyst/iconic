@@ -460,8 +460,14 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 			var convertedIcons: [CIImage] = []
 
-			for (mask, folder) in zip(maskIcons, folderIcons) {
-				convertedIcons.append(iconify(mask: mask, base: folder))
+			if maskIcons.count == folderIcons.count {
+				for (mask, folder) in zip(maskIcons, folderIcons) {
+					convertedIcons.append(iconify(mask: mask, base: folder))
+				}
+			} else {
+				for base in folderIcons {
+					convertedIcons.append(iconify(mask: maskIcons[0], base: base))
+				}
 			}
 
 			if options.verbose {
