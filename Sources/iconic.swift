@@ -585,10 +585,13 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 	@MainActor
 	@preconcurrency
 	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
+		try validateImageExtents(mask: mask, base: base)
+
+		let centeredMask = try centerImage(mask: mask, overBase: base)
+
+	func validateImageExtents(mask: CIImage, base: CIImage) throws {
 		let baseExtent = base.extent
 		let maskExtent = mask.extent
-
-		print(baseExtent, maskExtent)
 
 		guard !baseExtent.isInfinite, !baseExtent.isEmpty,
 			!maskExtent.isInfinite, !maskExtent.isEmpty
@@ -598,29 +601,36 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				reason: "Base or mask image has an infinite or empty extent."
 			)
 		}
+	}
+
+	func centerImage(mask: CIImage, overBase base: CIImage) throws -> CIImage {
+		let baseExtent = base.extent
+		let maskExtent = mask.extent
 
 		// Calculate the translation required to center
 		let targetX = baseExtent.origin.x + (baseExtent.width - maskExtent.width) / 2.0
 		let targetY = baseExtent.origin.y + (baseExtent.height - maskExtent.height) / 2.0
 		let translateX = targetX - maskExtent.origin.x
 		let translateY = targetY - maskExtent.origin.y
+
+		// Apply translation transform
 		let transform = CGAffineTransform(translationX: translateX, y: translateY)
+		return mask.transformed(by: transform)
+	}
 
-		print(targetX, targetY, translateX, translateY)
-
-		let translatedMask = mask.transformed(by: transform)
-
-		guard let multiplyFilter = CIFilter(name: "CIMultiplyCompositing") else {
-			print("Error: Could not create CIMultiplyCompositing filter. Returning base image.")
-			return base  // Return base as fallback
 		}
 
-		multiplyFilter.setValue(translatedMask, forKey: kCIInputImageKey)  // Foreground
-		multiplyFilter.setValue(base, forKey: kCIInputBackgroundImageKey)  // Background
+		// Calculate appropriate scale factor to maintain aspect ratio
+		let sourceSize = image.extent.size
+		let scaleX = targetSize.width / sourceSize.width
+		let scaleY = targetSize.height / sourceSize.height
+		let scale = min(scaleX, scaleY)
 
-		guard let outputImage = multiplyFilter.outputImage else {
-			print("Error: Filter did not produce an output image. Returning base image.")
-			return base
+		// Apply scaling filter
+		resizeFilter.setValue(image, forKey: kCIInputImageKey)
+		resizeFilter.setValue(scale, forKey: kCIInputScaleKey)
+		resizeFilter.setValue(1.0, forKey: kCIInputAspectRatioKey)
+
 		}
 
 		return translatedMask.composited(over: base)
