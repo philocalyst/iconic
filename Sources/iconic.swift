@@ -645,8 +645,8 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		// Calculate the translation required to center
 		let targetX = baseExtent.origin.x + (baseExtent.width - maskExtent.width) / 2.0
 		let targetY = baseExtent.origin.y + (baseExtent.height - maskExtent.height) / 2.0
-		let translateX = maskExtent.origin.x - targetX
-		let translateY = maskExtent.origin.y - targetY
+		let translateX = targetX - maskExtent.origin.x
+		let translateY = targetY - maskExtent.origin.y
 
 		print(targetX, targetY, translateX, translateY)
 
