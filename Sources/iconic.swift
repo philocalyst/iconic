@@ -13,7 +13,13 @@ let resourcesPath = "/Users/philocalyst/.local/share/"
 
 enum IconAssignmentError: Error, CustomStringConvertible {
 	case missingArgument(description: String)
+	case imageConversionFailed(description: String)
+	case missingAlpha(description: String)
 	case filterFailure(filter: String)
+	case cliExecutionFailed(command: String, exitCode: Int32, errorOutput: String)
+	case cliOutputParsingFailed(output: String, description: String)
+	case invalidTrimCoordinates(description: String)
+	case vipsNotFound(path: String)
 	case invalidImage(path: String)
 	case invalidIconPath(path: String, reason: String)
 	case invalidImageExtent(operation: String, reason: String)
@@ -28,8 +34,22 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 		switch self {
 		case .missingArgument(let description):
 			return description
-		case .invalidImage(let path):
-			return "Image at \(path) is invalid"
+		case .invalidImage(let pathOrReason):  // Modified to handle general invalid image issues
+			return "Invalid Image: \(pathOrReason)"
+		case .cliExecutionFailed(let command, let exitCode, let errorOutput):
+			return
+				"CLI command failed (Exit Code: \(exitCode)): '\(command)'. Error: \(errorOutput)"
+		case .cliOutputParsingFailed(let output, let description):
+			return "Failed to parse CLI output: \(description). Output was: '\(output)'"
+		case .invalidTrimCoordinates(let description):
+			return "Invalid Trim Coordinates: \(description)"  // Added prefix for clarity
+		case .vipsNotFound(let path):
+			return
+				"Required command-line tool 'vips' not found at expected path: \(path). Please ensure libvips is installed and accessible."
+		case .missingAlpha(let description):
+			return description
+		case .imageConversionFailed(let description):
+			return description
 		case .invalidIconPath(let path, let reason):
 			return "Invalid icon path '\(path)': \(reason)"
 		case .invalidTargetPath(let path, let reason):
@@ -514,8 +534,9 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 					let icnsURL = URL(fileURLWithPath: iconsetPath + String(index))
 					let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 					let context = CIContext()
-					try context.writeJPEGRepresentation(
+					try context.writePNGRepresentation(
 						of: convertedIcon, to: icnsURL,
+						format: .RGBA8,
 						colorSpace: colorSpace)
 					index += 1
 				}
@@ -587,13 +608,16 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
 		try validateImageExtents(mask: mask, base: base)
 
-		let centeredMask = try centerImage(mask: mask, overBase: base)
+		let cropped_mask = try cropTransparentPadding(image: mask)
+		let cropped_base = try cropTransparentPadding(image: base)
 
 		let resizedMask = try resizeImage(
-			centeredMask, toTargetSize: CGSize(width: 768, height: 384))
+			cropped_mask, toTargetSize: CGSize(width: 768, height: 384))
+
+		let centeredMask = try centerImage(mask: resizedMask, overBase: cropped_base)
 
 		// Composite the resized mask over the base image
-		return resizedMask.composited(over: base)
+		return centeredMask.composited(over: cropped_base)
 	}
 
 	func validateImageExtents(mask: CIImage, base: CIImage) throws {
@@ -617,8 +641,10 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		// Calculate the translation required to center
 		let targetX = baseExtent.origin.x + (baseExtent.width - maskExtent.width) / 2.0
 		let targetY = baseExtent.origin.y + (baseExtent.height - maskExtent.height) / 2.0
-		let translateX = targetX - maskExtent.origin.x
-		let translateY = targetY - maskExtent.origin.y
+		let translateX = maskExtent.origin.x - targetX
+		let translateY = maskExtent.origin.y - targetY
+
+		print(targetX, targetY, translateX, translateY)
 
 		// Apply translation transform
 		let transform = CGAffineTransform(translationX: translateX, y: translateY)
@@ -675,6 +701,150 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		let appearance = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
 		return appearance == "Dark"
 	}
+
+	func cropTransparentPadding(image: CIImage) throws -> CIImage {
+
+		let context = CIContext()
+		guard let cgImage = context.createCGImage(image, from: image.extent) else {
+			throw IconAssignmentError.imageConversionFailed(
+				description: "Failed to create CGImage from CIImage")
+		}
+
+		let temporaryDirectory = FileManager.default.temporaryDirectory
+		let inputFileName = UUID().uuidString + ".png"
+		let inputFileURL = temporaryDirectory.appendingPathComponent(inputFileName)
+
+		guard
+			let destination = CGImageDestinationCreateWithURL(
+				inputFileURL as CFURL, UTType.png.identifier as CFString, 1, nil)
+		else {
+			throw IconAssignmentError.imageConversionFailed(
+				description: "Failed to create image destination for input")
+		}
+
+		CGImageDestinationAddImage(destination, cgImage, nil)
+		guard CGImageDestinationFinalize(destination) else {
+			// Ensure cleanup even if finalize fails but file might exist
+			try? FileManager.default.removeItem(at: inputFileURL)
+			throw IconAssignmentError.imageConversionFailed(
+				description: "Failed to save temporary input image")
+		}
+
+		defer {
+			try? FileManager.default.removeItem(at: inputFileURL)
+		}
+
+		let vipsPath = "/opt/homebrew/bin/vips"
+
+		guard FileManager.default.fileExists(atPath: vipsPath) else {
+			throw IconAssignmentError.vipsNotFound(path: vipsPath)
+		}
+
+		let findTrimArgs = [
+			"find_trim", inputFileURL.path, "--background", "0", "--threshold", "0",
+		]
+		let findTrimOutput: String
+		do {
+			findTrimOutput = try runCommand(executable: vipsPath, arguments: findTrimArgs)
+			print(findTrimArgs)
+		} catch {
+			throw IconAssignmentError.invalidImage(path: "find_trim failed: \(error)")
+		}
+
+		let coordsString = findTrimOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+		let coordsArray = coordsString.split(separator: "\n").map { String($0) }
+
+		print(coordsArray)
+
+		guard coordsArray.count == 4,
+			let left = Int(coordsArray[0]),
+			let top = Int(coordsArray[1]),
+			let width = Int(coordsArray[2]),
+			let height = Int(coordsArray[3])
+		else {
+			throw IconAssignmentError.cliOutputParsingFailed(
+				output: findTrimOutput,
+				description: "Failed to parse 4 integer coordinates from find_trim output.")
+		}
+
+		if width <= 0 || height <= 0 {
+			return image
+		}
+
+		let outputFileName = UUID().uuidString + ".png"
+		let outputFileURL = temporaryDirectory.appendingPathComponent(outputFileName)
+
+		defer {
+			try? FileManager.default.removeItem(at: outputFileURL)
+		}
+
+		let cropArgs = [
+			"crop",
+			inputFileURL.path,
+			outputFileURL.path,
+			String(left),
+			String(top),
+			String(width),
+			String(height),
+		]
+
+		do {
+			_ = try runCommand(executable: vipsPath, arguments: cropArgs)  // Output not needed here
+		} catch {
+			throw IconAssignmentError.invalidImage(path: "crop failed: \(error)")
+		}
+
+		guard let processedCIImage = CIImage(contentsOf: outputFileURL) else {
+			throw IconAssignmentError.imageConversionFailed(
+				description:
+					"Failed to create CIImage from cropped file data at \(outputFileURL.path)")
+		}
+
+		// Temporary files are cleaned up by the defer statements
+
+		return processedCIImage
+	}
+
+	// Helper function to run shell commands
+	func runCommand(executable: String, arguments: [String]) throws -> String {
+		let process = Process()
+		process.executableURL = URL(fileURLWithPath: executable)
+		process.arguments = arguments
+
+		let outputPipe = Pipe()
+		let errorPipe = Pipe()
+		process.standardOutput = outputPipe
+		process.standardError = errorPipe
+
+		do {
+			try process.run()
+			process.waitUntilExit()
+
+			let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+			let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+			let output = String(data: outputData, encoding: .utf8) ?? ""
+			let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+
+			if process.terminationStatus == 0 {
+				return output
+			} else {
+				throw IconAssignmentError.cliExecutionFailed(
+					command: "\(executable) \(arguments.joined(separator: " "))",
+					exitCode: process.terminationStatus,
+					errorOutput: errorOutput.isEmpty ? "No error output" : errorOutput
+				)
+			}
+		} catch {
+			// Catch errors from process.run() itself (e.g., executable not found, though we check earlier)
+			throw IconAssignmentError.cliExecutionFailed(
+				command: "\(executable) \(arguments.joined(separator: " "))",
+				exitCode: -1,  // Indicate launch failure
+				errorOutput: "Failed to launch process: \(error.localizedDescription)"
+			)
+		}
+	}
+
 }
 
 Iconic.main()
