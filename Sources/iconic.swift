@@ -672,12 +672,8 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 	@MainActor
 	@preconcurrency
 	func isDarkMode() -> Bool {
-		// Use bestMatch to determine if the closest standard appearance is darkAqua.
-		if NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
-			return true
-		} else {
-			return false
-		}
+		let appearance = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
+		return appearance == "Dark"
 	}
 }
 
