@@ -589,6 +589,13 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 		let centeredMask = try centerImage(mask: mask, overBase: base)
 
+		let resizedMask = try resizeImage(
+			centeredMask, toTargetSize: CGSize(width: 768, height: 384))
+
+		// Composite the resized mask over the base image
+		return resizedMask.composited(over: base)
+	}
+
 	func validateImageExtents(mask: CIImage, base: CIImage) throws {
 		let baseExtent = base.extent
 		let maskExtent = mask.extent
@@ -618,6 +625,9 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		return mask.transformed(by: transform)
 	}
 
+	func resizeImage(_ image: CIImage, toTargetSize targetSize: CGSize) throws -> CIImage {
+		guard let resizeFilter = CIFilter(name: "CILanczosScaleTransform") else {
+			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform")
 		}
 
 		// Calculate appropriate scale factor to maintain aspect ratio
@@ -631,9 +641,11 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		resizeFilter.setValue(scale, forKey: kCIInputScaleKey)
 		resizeFilter.setValue(1.0, forKey: kCIInputAspectRatioKey)
 
+		guard let resizedImage = resizeFilter.outputImage else {
+			throw IconAssignmentError.filterFailure(filter: "Resize")
 		}
 
-		return translatedMask.composited(over: base)
+		return resizedImage
 	}
 
 	@MainActor
