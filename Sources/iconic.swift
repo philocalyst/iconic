@@ -910,6 +910,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 			let maskIcons = getAllCIImages(from: maskImage)
 			let folderIcons = getAllCIImages(from: folderImage)
+			let maskk = try cropTransparentPadding(image: maskIcons[0])
 
 			var convertedIcons: [CIImage] = []
 
@@ -919,7 +920,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				}
 			} else {
 				for base in folderIcons {
-					try convertedIcons.append(iconify(mask: maskIcons[0], base: base))
+					try convertedIcons.append(iconify(mask: maskk, base: base))
 				}
 			}
 
@@ -1034,10 +1035,9 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
 		try validateImageExtents(mask: mask, base: base)
 
-		let cropped_mask = try cropTransparentPadding(image: mask)
 		let cropped_base = try cropTransparentPadding(image: base)
 
-		let resizedMask = try cropped_mask.resize(
+		let resizedMask = try mask.resize(
 			atRatio: 0.5, relativeTo: cropped_base.extent.size)
 
 		let centeredMask = try resizedMask.center(overBase: cropped_base)
