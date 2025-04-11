@@ -78,6 +78,256 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 	}
 }
 
+extension CIImage {
+	// MARK: - Basic Operations
+
+	/// Colorizes the image with a specified fill color
+	func fillColorize(color: CIColor) throws -> CIImage {
+		guard let colorFilter = CIFilter(name: "CIColorMonochrome") else {
+			throw IconAssignmentError.filterFailure(filter: "CIColorMonochrome")
+		}
+
+		colorFilter.setValue(self, forKey: kCIInputImageKey)
+		colorFilter.setValue(color, forKey: kCIInputColorKey)
+		colorFilter.setValue(1.0, forKey: kCIInputIntensityKey)
+
+		guard let outputImage = colorFilter.outputImage else {
+			throw IconAssignmentError.imageConversionFailed(description: "Failed to colorize image")
+		}
+
+		return outputImage
+	}
+
+	func resize(atRatio targetRatio: CGFloat, relativeTo baseDimension: CGSize)
+		throws -> CIImage
+	{
+		guard let resizeFilter = CIFilter(name: "CILanczosScaleTransform") else {
+			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform")
+		}
+
+		let sourceSize = self.extent.size
+		guard sourceSize.width > 0 && sourceSize.height > 0 else {
+			print("Warning: Input image has zero dimensions. Returning original image.")
+			throw IconAssignmentError.invalidSourceSize
+		}
+
+		let targetSize = CGSize(
+			width: baseDimension.width * targetRatio,
+			height: baseDimension.height * targetRatio)
+
+		guard targetSize.width > 0 && targetSize.height > 0 else {
+			// Handle cases where baseDimension or targetRatio results in zero target size
+			throw IconAssignmentError.invalidTargetDimensions
+		}
+
+		// The image needs to fit within the targetSize.
+		let widthRatio = targetSize.width / sourceSize.width
+		let heightRatio = targetSize.height / sourceSize.height
+
+		// Minimum to bound-check
+		let scale = min(widthRatio, heightRatio)
+
+		// Ensure scale is positive
+		guard scale > 0 else {
+			// Only really possible if you have a non-positive input value
+			throw IconAssignmentError.invalidTargetDimensions
+		}
+
+		resizeFilter.setValue(self, forKey: kCIInputImageKey)
+		resizeFilter.setValue(scale, forKey: kCIInputScaleKey)
+		// Aspect ratio needs to be one for even scaling
+		resizeFilter.setValue(1.0, forKey: kCIInputAspectRatioKey)
+
+		guard let resizedImage = resizeFilter.outputImage else {
+			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform_Output")
+		}
+
+		return resizedImage
+	}
+
+	func center(overBase base: CIImage) throws -> CIImage {
+		let baseExtent = base.extent
+		let maskExtent = self.extent
+
+		// Calculate the translation required to center
+		let targetX = baseExtent.origin.x + (baseExtent.width - maskExtent.width) / 2.0
+		let targetY = baseExtent.origin.y + (baseExtent.height - maskExtent.height) / 2.0
+		let translateX = targetX - maskExtent.origin.x
+		let translateY = targetY - maskExtent.origin.y
+
+		print(targetX, targetY, translateX, translateY)
+
+		// Apply translation transform
+		let transform = CGAffineTransform(translationX: translateX, y: translateY)
+		return self.transformed(by: transform)
+	}
+
+	/// Adjusts the opacity of the image
+	func applyOpacity(_ opacity: CGFloat) throws -> CIImage {
+		let outputImage = self.applyingFilter(
+			"CIColorMatrix",
+			parameters: [
+				"inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+				"inputGVector": CIVector(x: 0, y: 1, z: 0, w: 0),
+				"inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0),
+				"inputAVector": CIVector(x: 0, y: 0, z: 0, w: opacity),
+				"inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+			])
+
+		return outputImage
+	}
+
+	func engrave(sizeMask: CIImage, templateIcon: CIImage, inputs: EngravingInputs) throws
+		-> CIImage
+	{
+		let fillColorized = try sizeMask.fillColorize(color: inputs.fillColor)
+
+		let fill = try fillColorized.applyOpacity(0.5)
+
+		let topBezelComplement = try sizeMask.negate()
+
+		let topBezelColorized = try topBezelComplement.fillColorize(color: inputs.topBezel.color)
+
+		let topBezelBlurred = try topBezelColorized.blurDown(radius: inputs.topBezel.blur)
+
+		// Composite top bezel
+		let topBezelMasked = try topBezelBlurred.maskDown(
+			mask: sizeMask, operation: inputs.topBezel.maskOperation)
+
+		let topBezel = try topBezelMasked.applyOpacity(inputs.topBezel.opacity)
+
+		let bottomBezelColorized = try sizeMask.fillColorize(color: inputs.bottomBezel.color)
+
+		let bottomBezelBlurred = try bottomBezelColorized.blurDown(radius: inputs.bottomBezel.blur)
+
+		// Composite bottom bezel
+		let bottomBezelMasked = try bottomBezelBlurred.maskDown(
+			mask: sizeMask, operation: inputs.bottomBezel.maskOperation)
+
+		// Set bottom bezel opacity
+		let bottomBezel = try bottomBezelMasked.applyOpacity(inputs.bottomBezel.opacity)
+
+		// Engraving
+		let compositedWithBottom = try templateIcon.composite(
+			over: bottomBezel, operation: "dissolve")
+
+		let compositedWithFill = try compositedWithBottom.composite(
+			over: fill, operation: "dissolve")
+
+		return try compositedWithFill.composite(over: topBezel, operation: "dissolve")
+	}
+
+	func composite(over background: CIImage, operation: String = "dissolve") throws -> CIImage {
+		let filterName: String
+
+		switch operation {
+		case "dissolve":
+			filterName = "CISourceOverCompositing"
+		case "multiply":
+			filterName = "CIMultiplyBlendMode"
+		case "screen":
+			filterName = "CIScreenBlendMode"
+		case "overlay":
+			filterName = "CIOverlayBlendMode"
+		default:
+			filterName = "CISourceOverCompositing"
+		}
+
+		guard let filter = CIFilter(name: filterName) else {
+			throw IconAssignmentError.filterFailure(filter: filterName)
+		}
+
+		filter.setValue(self, forKey: kCIInputImageKey)
+		filter.setValue(background, forKey: kCIInputBackgroundImageKey)
+
+		guard let outputImage = filter.outputImage else {
+			throw IconAssignmentError.imageConversionFailed(
+				description: "Failed to composite images")
+		}
+
+		return outputImage
+	}
+
+	func negate() throws -> CIImage {
+		let outputImage = self.applyingFilter("CIColorInvert")
+		return outputImage
+	}
+
+	func blurDown(radius: CGFloat) throws -> CIImage {
+		let outputImage = self.applyingFilter(
+			"CIGaussianBlur", parameters: ["inputRadius": radius])
+
+		return outputImage
+	}
+
+	func maskDown(mask: CIImage, operation: String) throws -> CIImage {
+		switch operation {
+		case "multiply", "default":
+			guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
+				throw IconAssignmentError.filterFailure(filter: "CIBlendWithMask")
+			}
+
+			blendFilter.setValue(self, forKey: kCIInputImageKey)
+			blendFilter.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
+			blendFilter.setValue(mask, forKey: kCIInputMaskImageKey)
+
+			guard let outputImage = blendFilter.outputImage else {
+				throw IconAssignmentError.imageConversionFailed(description: "Failed to mask image")
+			}
+
+			return outputImage
+
+		case "dst-in":
+
+			guard let dstInFilter = CIFilter(name: "CISourceOutCompositing") else {
+				throw IconAssignmentError.filterFailure(filter: "CISourceOutCompositing")
+			}
+
+			dstInFilter.setValue(self, forKey: kCIInputImageKey)
+			dstInFilter.setValue(mask, forKey: kCIInputBackgroundImageKey)
+
+			guard let outputImage = dstInFilter.outputImage else {
+				throw IconAssignmentError.imageConversionFailed(
+					description: "Failed to composite image")
+			}
+
+			return outputImage
+		case "dst-out":
+			guard let dstOutFilter = CIFilter(name: "CISourceInCompositing") else {
+				throw IconAssignmentError.filterFailure(filter: "CISourceInCompositing")
+			}
+
+			dstOutFilter.setValue(self, forKey: kCIInputImageKey)
+			dstOutFilter.setValue(mask, forKey: kCIInputBackgroundImageKey)
+
+			guard let outputImage = dstOutFilter.outputImage else {
+				throw IconAssignmentError.imageConversionFailed(
+					description: "Failed to composite image")
+			}
+
+			return outputImage
+		case "darken":
+			guard let darkenFilter = CIFilter(name: "CIDarkenBlendMode") else {
+				throw IconAssignmentError.filterFailure(filter: "CIDarkenBlendMode")
+			}
+
+			darkenFilter.setValue(self, forKey: kCIInputImageKey)
+			darkenFilter.setValue(mask, forKey: kCIInputBackgroundImageKey)
+
+			guard let outputImage = darkenFilter.outputImage else {
+				throw IconAssignmentError.imageConversionFailed(
+					description: "Failed to darken mask image")
+			}
+
+			return outputImage
+
+		default:
+			throw IconAssignmentError.invalidImageExtent(
+				operation: "maskDown", reason: "Unknown mask operation: \(operation)")
+		}
+	}
+}
+
 var logger = Logger(label: "com.philocalyst.iconic")
 
 // Respectful lil function; doesn't print when quiet is enabled
@@ -615,13 +865,12 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		let cropped_mask = try cropTransparentPadding(image: mask)
 		let cropped_base = try cropTransparentPadding(image: base)
 
-		let resizedMask = try resizeImage(
-			cropped_mask, toTargetRatio: 0.5, baseDimension: cropped_base.extent.size)
+		let resizedMask = try cropped_mask.resize(
+			atRatio: 0.5, relativeTo: cropped_base.extent.size)
 
-		let centeredMask = try centerImage(mask: resizedMask, overBase: cropped_base)
+		let centeredMask = try resizedMask.center(overBase: cropped_base)
 
-		// Composite the resized mask over the base image
-		return centeredMask.composited(over: cropped_base)
+		)
 	}
 
 	func validateImageExtents(mask: CIImage, base: CIImage) throws {
@@ -636,69 +885,6 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				reason: "Base or mask image has an infinite or empty extent."
 			)
 		}
-	}
-
-	func centerImage(mask: CIImage, overBase base: CIImage) throws -> CIImage {
-		let baseExtent = base.extent
-		let maskExtent = mask.extent
-
-		// Calculate the translation required to center
-		let targetX = baseExtent.origin.x + (baseExtent.width - maskExtent.width) / 2.0
-		let targetY = baseExtent.origin.y + (baseExtent.height - maskExtent.height) / 2.0
-		let translateX = targetX - maskExtent.origin.x
-		let translateY = targetY - maskExtent.origin.y
-
-		print(targetX, targetY, translateX, translateY)
-
-		// Apply translation transform
-		let transform = CGAffineTransform(translationX: translateX, y: translateY)
-		return mask.transformed(by: transform)
-	}
-
-	func resizeImage(_ image: CIImage, toTargetRatio targetRatio: CGFloat, baseDimension: CGSize)
-		throws -> CIImage
-	{
-		guard let resizeFilter = CIFilter(name: "CILanczosScaleTransform") else {
-			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform")
-		}
-
-		let sourceSize = image.extent.size
-		guard sourceSize.width > 0 && sourceSize.height > 0 else {
-			print("Warning: Input image has zero dimensions. Returning original image.")
-			throw IconAssignmentError.invalidSourceSize
-		}
-
-		let targetSize = CGSize(
-			width: baseDimension.width * targetRatio,
-			height: baseDimension.height * targetRatio)
-
-		guard targetSize.width > 0 && targetSize.height > 0 else {
-			// Handle cases where baseDimension or targetRatio results in zero target size
-			throw IconAssignmentError.invalidTargetDimensions
-		}
-
-		//    The image should fit *within* the targetSize.
-		let widthRatio = targetSize.width / sourceSize.width
-		let heightRatio = targetSize.height / sourceSize.height
-		// Use the *minimum* ratio to ensure the scaled image fits within the target bounds
-		let scale = min(widthRatio, heightRatio)
-
-		// Ensure scale is positive
-		guard scale > 0 else {
-			// Only really possible if you have a non-positive input value
-			throw IconAssignmentError.invalidTargetDimensions
-		}
-
-		resizeFilter.setValue(image, forKey: kCIInputImageKey)
-		resizeFilter.setValue(scale, forKey: kCIInputScaleKey)
-		// Aspect ratio needs to be one for even scaling
-		resizeFilter.setValue(1.0, forKey: kCIInputAspectRatioKey)
-
-		guard let resizedImage = resizeFilter.outputImage else {
-			throw IconAssignmentError.filterFailure(filter: "CILanczosScaleTransform_Output")
-		}
-
-		return resizedImage
 	}
 
 	@MainActor
