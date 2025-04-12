@@ -10,6 +10,14 @@ enum ColorScheme: String, ExpressibleByArgument, CaseIterable {
 }
 
 let resourcesPath = "/Users/philocalyst/.local/share/"
+let appName = "iconic"
+let maintainerName = "philocalyst"
+
+let home_env = ProcessInfo.processInfo.environment["HOME"]
+let resourcesPath: String
+if let home = home_env {
+	resourcesPath = home + ".local/share/" + appName + "/"
+}
 
 enum IconAssignmentError: Error, CustomStringConvertible {
 	case missingArgument(description: String)
