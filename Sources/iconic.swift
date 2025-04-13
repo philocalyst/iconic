@@ -3,7 +3,10 @@ import ArgumentParser
 import CoreImage
 import Foundation
 import Logging
-import SwiftVips
+import Metal
+import MetalKit
+import UniformTypeIdentifiers
+
 final class LoggerProvider: @unchecked Sendable {
 	static let shared = LoggerProvider()
 
@@ -45,6 +48,39 @@ let maintainerName = "philocalyst"
 
 let resourcesPath: String? = ProcessInfo.processInfo.environment["HOME"].map { homeDir in
 	"\(homeDir)/.local/share/\(appName)/"
+}
+
+enum ImageTrimError: LocalizedError {
+	case metalInitializationFailed(String)
+	case bufferCreationFailed
+	case commandCreationFailed
+	case calculationFailed
+	case ciContextCreationFailed
+	case ciImageRenderingFailed(String)
+	case ciImageHasInfiniteExtent
+	case metalTextureCreationFailed
+
+	var errorDescription: String? {
+		switch self {
+		case .metalInitializationFailed(let reason):
+			return "Failed to initialize Metal: \(reason)"
+		case .bufferCreationFailed:
+			return "Failed to create Metal buffer for bounding box."
+		case .commandCreationFailed:
+			return "Failed to create Metal command buffer or encoder."
+		case .calculationFailed:
+			return
+				"Metal kernel failed to find a valid bounding box (e.g., image is fully transparent or calculation error)."
+		case .ciContextCreationFailed:
+			return "Failed to create CIContext for rendering."
+		case .ciImageRenderingFailed(let reason):
+			return "Failed to render CIImage to Metal texture: \(reason)"
+		case .ciImageHasInfiniteExtent:
+			return "Cannot process CIImage with infinite extent."
+		case .metalTextureCreationFailed:
+			return "Failed to create Metal texture for rendering CIImage."
+		}
+	}
 }
 
 enum IconAssignmentError: Error, CustomStringConvertible {
@@ -114,183 +150,118 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 	}
 }
 
-extension CGBitmapInfo {
-	public enum ComponentLayout {
-		case bgra
-		case abgr
-		case argb
-		case rgba
-		case bgr
-		case rgb
+@preconcurrency final class MetalTrimmingContext {
 
-		var count: Int {
-			switch self {
-			case .bgr, .rgb: return 3
-			default: return 4
-			}
-		}
 	let log = LoggerProvider.shared.getLogger()
+
+	// Shared instance for the program
+	static let shared = try! MetalTrimmingContext()
+
+	let device: MTLDevice
+	let commandQueue: MTLCommandQueue
+	let pipelineState: MTLComputePipelineState
+	let ciContext: CIContext  // Needed for rendering the CIImage to texture
+
+	// This constant is for matching the struct the metal engine uses to calculate the bounding box
+	enum BBoxIndex: Int {
+		case minX = 0
+		case minY = 1
+		case maxX = 2
+		case maxY = 3
+		static let count = 4
 	}
 
-	public var componentLayout: ComponentLayout? {
-		guard let alphaInfo = CGImageAlphaInfo(rawValue: rawValue & Self.alphaInfoMask.rawValue)
-		else { return nil }
-		let isLittleEndian = contains(.byteOrder32Little)
+	private init() throws {
+		// Retrieve the metal device, using the default processor
+		guard let defaultDevice = MTLCreateSystemDefaultDevice() else {
+			throw ImageTrimError.metalInitializationFailed("Could not create default Metal device.")
+		}
 
-		if alphaInfo == .none {
-			return isLittleEndian ? .bgr : .rgb
+		self.device = defaultDevice
 		log.info("MetalTrimmingContext: Using Metal device: \(device.name)")
 
+		guard let queue = device.makeCommandQueue() else {
+			throw ImageTrimError.metalInitializationFailed("Could not create command queue.")
 		}
-		let alphaIsFirst =
-			alphaInfo == .premultipliedFirst || alphaInfo == .first || alphaInfo == .noneSkipFirst
+		self.commandQueue = queue
 
-		if isLittleEndian {
-			return alphaIsFirst ? .bgra : .abgr
-		} else {
-			return alphaIsFirst ? .argb : .rgba
+		// CIConext backed by metal device
+		self.ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
 		log.info("MetalTrimmingContext: CIContext created.")
 
+		// Loading the metal library and our custom kernel function
+		let kernelFunction: MTLFunction
+		do {
+			// Try loading the default library from the default location (main)
+			let library = try device.makeDefaultLibrary(bundle: .main)
+			guard let function = library.makeFunction(name: "findBoundingBox") else {
+				throw ImageTrimError.metalInitializationFailed(
+					"Kernel 'findBoundingBox' not found in default library.")
+			}
+			kernelFunction = function
+			print("Loaded kernel function from default library.")
+		} catch {
+			// If loading the precompiled from that location doesn't work, try to compile ourselves.
+			print("Default library not found or kernel missing. Trying to compile from source...")
+			let metalFileURL = URL(
+				fileURLWithPath: "/Users/philocalyst/Projects/iconic/Sources/SmartTrim.metal"
+			)  // Stand-in pathing
+
+			guard FileManager.default.fileExists(atPath: metalFileURL.path) else {
+				throw ImageTrimError.metalInitializationFailed(
+					"SmartTrim.metal not found at \(metalFileURL.path). Cannot compile from source."
+				)
+			}
+
+			// Compilation
+			do {
+				let source = try String(contentsOf: metalFileURL, encoding: .utf8)
+				let library = try device.makeLibrary(source: source, options: nil)
+				guard let function = library.makeFunction(name: "findBoundingBox") else {
+					throw ImageTrimError.metalInitializationFailed(
+						"Kernel 'findBoundingBox' not found after compiling source.")
+				}
+				kernelFunction = function
+				print("Successfully compiled kernel function from source.")
+			} catch let compileError {
+				throw ImageTrimError.metalInitializationFailed(
+					"Could not compile Metal source: \(compileError.localizedDescription)")
+			}
+		}
+
+		// Create the compute pipeline state using the kernel function.
+		do {
+			self.pipelineState = try device.makeComputePipelineState(function: kernelFunction)
+		} catch {
+			throw ImageTrimError.metalInitializationFailed(
+				"Could not create compute pipeline state: \(error.localizedDescription)")
 		}
 	}
-
-	public var chromaIsPremultipliedByAlpha: Bool {
-		let alphaInfo = CGImageAlphaInfo(rawValue: rawValue & Self.alphaInfoMask.rawValue)
-		return alphaInfo == .premultipliedFirst || alphaInfo == .premultipliedLast
-	}
 }
 
-extension CGColor {
-	public static func create(red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) -> CGColor {
-		return CGColor(
-			red: CGFloat(red) / 255,
-			green: CGFloat(green) / 255,
-			blue: CGFloat(blue) / 255,
-			alpha: CGFloat(alpha) / 255
-		)
-		let log = LoggerProvider.shared.getLogger()
-		log.debug("Attempting to load Metal kernel '\(functionName)'")
-
-	}
-}
-
+// MARK: - CIImage Extension (Existing + New Metal Bounding Box)
 extension CIImage {
-	// MARK: - Basic Operations
-	//
 
-	var pixelWidth: Int {
-		return cgImage?.width ?? 0
 	}
 
 	var pixelHeight: Int {
 		return cgImage?.height ?? 0
 	}
 
-	func pixelColor(x: Int, y: Int) -> CGColor {
-		assert(
-			0..<pixelWidth ~= x && 0..<pixelHeight ~= y,
-			"Pixel coordinates are out of bounds"
-		)
 
-		guard
-			let cgImage = cgImage,
-			let data = cgImage.dataProvider?.data,
-			let dataPtr = CFDataGetBytePtr(data),
-			let colorSpaceModel = cgImage.colorSpace?.model,
-			let componentLayout = cgImage.bitmapInfo.componentLayout
-		else {
-			assertionFailure("Could not get a pixel of an image")
-			return CGColor(gray: 0, alpha: 0)
-		}
 
-		assert(
-			colorSpaceModel == .rgb,
-			"The only supported color space model is RGB"
-		)
-		assert(
-			cgImage.bitsPerPixel == 32 || cgImage.bitsPerPixel == 24,
-			"A pixel is expected to be either 4 or 3 bytes in size"
-		)
 		let log = LoggerProvider.shared.getLogger()
 
-		let bytesPerRow = cgImage.bytesPerRow
-		let bytesPerPixel = cgImage.bitsPerPixel / 8
-		let pixelOffset = y * bytesPerRow + x * bytesPerPixel
 
-		if componentLayout.count == 4 {
-			let components = (
-				dataPtr[pixelOffset + 0],
-				dataPtr[pixelOffset + 1],
-				dataPtr[pixelOffset + 2],
-				dataPtr[pixelOffset + 3]
 			)
 
-			var alpha: UInt8 = 0
-			var red: UInt8 = 0
-			var green: UInt8 = 0
-			var blue: UInt8 = 0
 
-			switch componentLayout {
-			case .bgra:
-				alpha = components.3
-				red = components.2
-				green = components.1
-				blue = components.0
-			case .abgr:
-				alpha = components.0
-				red = components.3
-				green = components.2
-				blue = components.1
-			case .argb:
-				alpha = components.0
-				red = components.1
-				green = components.2
-				blue = components.3
-			case .rgba:
-				alpha = components.3
-				red = components.0
-				green = components.1
-				blue = components.2
-			default:
-				return CGColor(gray: 0, alpha: 0)
-			}
 
-			/// If chroma components are premultiplied by alpha and the alpha is `0`,
-			/// keep the chroma components to their current values.
-			if cgImage.bitmapInfo.chromaIsPremultipliedByAlpha, alpha != 0 {
-				let invisibleUnitAlpha = 255 / CGFloat(alpha)
-				red = UInt8((CGFloat(red) * invisibleUnitAlpha).rounded())
-				green = UInt8((CGFloat(green) * invisibleUnitAlpha).rounded())
-				blue = UInt8((CGFloat(blue) * invisibleUnitAlpha).rounded())
-			}
 
-			return CGColor.create(red: red, green: green, blue: blue, alpha: alpha)
 
-		} else if componentLayout.count == 3 {
-			let components = (
-				dataPtr[pixelOffset + 0],
-				dataPtr[pixelOffset + 1],
-				dataPtr[pixelOffset + 2]
-			)
 
-			var red: UInt8 = 0
-			var green: UInt8 = 0
-			var blue: UInt8 = 0
 
-			switch componentLayout {
-			case .bgr:
-				red = components.2
-				green = components.1
-				blue = components.0
-			case .rgb:
-				red = components.0
-				green = components.1
-				blue = components.2
-			default:
-				return CGColor(gray: 0, alpha: 0)
-			}
 
-			return CGColor.create(red: red, green: green, blue: blue, alpha: UInt8(255))
 
 		} else {
 			assertionFailure("Unsupported number of pixel components")
@@ -298,22 +269,163 @@ extension CIImage {
 		}
 	}
 
-	/// Colorizes the image with a specified fill color
-	func fillColorize(color: CIColor) throws -> CIImage {
-		guard let colorFilter = CIFilter(name: "CIColorMonochrome") else {
-			throw IconAssignmentError.filterFailure(filter: "CIColorMonochrome")
+	/// Responsible for detecting the bounding box of non-transparent pixels
+	/// Assumes that transparency is defined by the alpha channel, and an alpha threshold (Defined in the metal source)
+	/// Returning a bounding box as a CGRect that correspounds to the image's coordinate space from its extent origin.
+	// If the image is fully transparent, has no dimensions, or has infinite extent; returns as a CGRect.null.
+	/// Throwing erros as ImageTrimError
+	func getAliveImage() throws -> CGRect {
 		let log = LoggerProvider.shared.getLogger()
+		let metalContext = MetalTrimmingContext.shared  // Get shared context
+		let device = metalContext.device
+		let commandQueue = metalContext.commandQueue
+		let pipelineState = metalContext.pipelineState
+		let ciContext = metalContext.ciContext
+		typealias BBoxIndex = MetalTrimmingContext.BBoxIndex  // Use enum from context
+
+		let imageExtent = self.extent
+		guard !imageExtent.isInfinite, imageExtent.width > 0, imageExtent.height > 0 else {
+			log.info(
+				"Cannot find bounding box: CIImage has zero size or infinite extent: \(imageExtent.debugDescription)",
+			)
+			return .null
 		}
 
-		colorFilter.setValue(self, forKey: kCIInputImageKey)
-		colorFilter.setValue(color, forKey: kCIInputColorKey)
-		colorFilter.setValue(1.0, forKey: kCIInputIntensityKey)
+		let textureWidth = Int(imageExtent.width.rounded(.up))
+		let textureHeight = Int(imageExtent.height.rounded(.up))
 
-		guard let outputImage = colorFilter.outputImage else {
-			throw IconAssignmentError.imageConversionFailed(description: "Failed to colorize image")
+		// Create substrate Metal Texture
+		let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+			pixelFormat: .bgra8Unorm,
+			width: textureWidth,
+			height: textureHeight,
+			mipmapped: false
+		)
+		textureDescriptor.usage = [.shaderRead, .renderTarget]  // Readable by kernel, writable by CIContext
+		textureDescriptor.storageMode = .private
+
+		guard let texture = device.makeTexture(descriptor: textureDescriptor) else {
+			throw ImageTrimError.metalTextureCreationFailed
+		}
+		texture.label = "BoundingBox Render Target Texture"
+
+		// Render CIImage to Metal Texture
+		let renderCommandBuffer = commandQueue.makeCommandBuffer()
+		renderCommandBuffer?.label = "CIImage Render To Texture CB"
+
+		// Determine render bounds and colorspace
+		let renderBounds = CGRect(
+			origin: .zero, size: CGSize(width: textureWidth, height: textureHeight))
+		let renderImage = self.transformed(
+			by: .init(translationX: -imageExtent.origin.x, y: -imageExtent.origin.y))  // Adjust origin to 0,0 for rendering to expectations
+		let colorSpace = self.colorSpace ?? CGColorSpaceCreateDeviceRGB()  // Ensure valid colorspace
+
+		ciContext.render(
+			renderImage,
+			to: texture,
+			commandBuffer: renderCommandBuffer,
+			bounds: renderBounds,
+			colorSpace: colorSpace)
+
+		renderCommandBuffer?.commit()
+		renderCommandBuffer?.waitUntilCompleted()  // Wait for rendering to finish the rest of the functions run
+
+		if let error = renderCommandBuffer?.error {
+			throw ImageTrimError.ciImageRenderingFailed(
+				"GPU error during CIContext render: \(error.localizedDescription)")
+		}
+		log.debug("CIImage rendered to Metal texture for bounding box calculation.")
+
+		// Create results buffer
+		let bufferSize = BBoxIndex.count * MemoryLayout<UInt32>.stride
+		guard
+			let boundingBoxBuffer = device.makeBuffer(
+				length: bufferSize, options: [.storageModeShared])
+		else {
+			throw ImageTrimError.bufferCreationFailed
+		}
+		boundingBoxBuffer.label = "Bounding Box Result Buffer"
+
+		// Initialize buffer (min coords = max value, max coords = 0)
+		let bufferPointer = boundingBoxBuffer.contents().bindMemory(
+			to: UInt32.self, capacity: BBoxIndex.count)
+		bufferPointer[BBoxIndex.minX.rawValue] = UInt32.max
+		bufferPointer[BBoxIndex.minY.rawValue] = UInt32.max
+		bufferPointer[BBoxIndex.maxX.rawValue] = 0
+		bufferPointer[BBoxIndex.maxY.rawValue] = 0
+
+		// Encode and Dispatch Compute Kernel
+		guard let computeCommandBuffer = commandQueue.makeCommandBuffer() else {
+			throw ImageTrimError.commandCreationFailed
+		}
+		computeCommandBuffer.label = "Find Bounding Box Compute CB"
+
+		guard let computeCommandEncoder = computeCommandBuffer.makeComputeCommandEncoder() else {
+			throw ImageTrimError.commandCreationFailed
+		}
+		computeCommandEncoder.label = "Find Bounding Box Encoder"
+
+		computeCommandEncoder.setComputePipelineState(pipelineState)
+		computeCommandEncoder.setTexture(texture, index: 0)  // Input texture at index 0
+		computeCommandEncoder.setBuffer(boundingBoxBuffer, offset: 0, index: 0)  // Output buffer at index 0
+
+		// Calculate threadgroups
+		let threadsPerGroupWidth = pipelineState.threadExecutionWidth
+		let threadsPerGroupHeight =
+			pipelineState.maxTotalThreadsPerThreadgroup / threadsPerGroupWidth
+		let threadsPerThreadgroup = MTLSize(
+			width: threadsPerGroupWidth, height: threadsPerGroupHeight, depth: 1)
+		let numThreadgroups = MTLSize(
+			width: (texture.width + threadsPerGroupWidth - 1) / threadsPerGroupWidth,
+			height: (texture.height + threadsPerGroupHeight - 1) / threadsPerGroupHeight,
+			depth: 1
+		)
+
+		computeCommandEncoder.dispatchThreadgroups(
+			numThreadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+		computeCommandEncoder.endEncoding()
+
+		// Execute, read
+		let startTime = DispatchTime.now()
+		computeCommandBuffer.commit()
+		computeCommandBuffer.waitUntilCompleted()  // Wait for GPU kernel execution
+		let endTime = DispatchTime.now()
+
+		let nanoTime = endTime.uptimeNanoseconds - startTime.uptimeNanoseconds
+		let timeIntervalMilliseconds = Double(nanoTime) / 1_000_000.0
+		log.info("Metal bounding box compute time: \(timeIntervalMilliseconds) ms")
+
+		if let error = computeCommandBuffer.error {
+			throw ImageTrimError.metalInitializationFailed(
+				"GPU command execution failed: \(error.localizedDescription)")
 		}
 
-		return outputImage
+		// Read results back from buffer
+		// Re-bind pointer just in case with the storage mode and wait until completed..
+		let resultPointer = boundingBoxBuffer.contents().bindMemory(
+			to: UInt32.self, capacity: BBoxIndex.count)
+		let minX = Int(resultPointer[BBoxIndex.minX.rawValue])
+		let minY = Int(resultPointer[BBoxIndex.minY.rawValue])
+		let maxX = Int(resultPointer[BBoxIndex.maxX.rawValue])
+		let maxY = Int(resultPointer[BBoxIndex.maxY.rawValue])
+
+		// Check if any non-transparent pixels were found
+		if minX == Int(UInt32.max) || minX > maxX || minY > maxY {
+			log.info("Metal bounding box calculation found no non-transparent pixels.")
+			return .null  // Indicate nothing was found
+		}
+
+		// Adjust coordinates back relative to the original image's extent origin
+		let finalMinX = CGFloat(minX) + imageExtent.origin.x
+		let finalMinY = CGFloat(minY) + imageExtent.origin.y
+		let boundingWidth = CGFloat(maxX - minX + 1)
+		let boundingHeight = CGFloat(maxY - minY + 1)
+
+		let boundingBox = CGRect(
+			x: finalMinX, y: finalMinY, width: boundingWidth, height: boundingHeight)
+
+		log.debug("Metal found bounding box: \(boundingBox.debugDescription)")
+		return boundingBox
 	}
 
 	func resize(atRatio targetRatio: CGFloat, relativeTo baseDimension: CGSize)
@@ -555,6 +667,7 @@ func quietPrint(_ message: String, isQuiet: Bool) {
 
 // Define the main command structure
 @main
+struct Iconic: ParsableCommand {
 
 	// MARK: - Configuration
 
@@ -1070,10 +1183,10 @@ struct MaskIcon: ParsableCommand {
 		}
 	}
 
-	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
+	func iconify(mask: CIImage, base: CIImage) async throws -> CIImage {
 		try validateImageExtents(mask: mask, base: base)
 
-		let cropped_base = try cropTransparentPadding(image: base)
+		let cropped_base = try await cropPadding(image: base)
 
 		let resizedMask = try mask.resize(
 			atRatio: 0.5, relativeTo: cropped_base.extent.size)
@@ -1119,6 +1232,16 @@ struct MaskIcon: ParsableCommand {
 	func isDarkMode() -> Bool {
 		let appearance = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
 		return appearance == "Dark"
+	}
+
+	func cropPadding(image: CIImage) async throws -> CIImage {
+		print("Creating Metal texture...")
+
+		print("Running Metal kernel to find bounding box...")
+		let boundingBox = try await image.getAliveImage()  // Timing is inside here now
+
+		let croppedImage = image.cropped(to: boundingBox)
+		return croppedImage
 	}
 
 	func cropTransparentPadding(image: CIImage) throws -> CIImage {
