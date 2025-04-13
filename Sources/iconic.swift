@@ -4,6 +4,37 @@ import CoreImage
 import Foundation
 import Logging
 import SwiftVips
+final class LoggerProvider: @unchecked Sendable {
+	static let shared = LoggerProvider()
+
+	// Using a lock here to protect access to the internalLogger
+	private let lock = NSLock()
+
+	private var internalLogger: Logger
+
+	private init() {
+		self.internalLogger = Logger(label: "com.philocalyst.iconic")
+		self.internalLogger.logLevel = .notice
+	}
+
+	func configure(level: Logger.Level) {
+		lock.lock()
+		defer {
+			lock.unlock()
+		}
+		self.internalLogger.logLevel = level
+		internalLogger.info("Logger level configured to: \(level.rawValue)")
+	}
+
+	func getLogger() -> Logger {
+		lock.lock()
+		defer {
+			lock.unlock()
+		}
+		// This returns a copy holding the current configuration
+		return internalLogger
+	}
+}
 
 enum ColorScheme: String, ExpressibleByArgument, CaseIterable {
 	case auto, light, dark
@@ -98,6 +129,7 @@ extension CGBitmapInfo {
 			default: return 4
 			}
 		}
+	let log = LoggerProvider.shared.getLogger()
 	}
 
 	public var componentLayout: ComponentLayout? {
@@ -107,6 +139,8 @@ extension CGBitmapInfo {
 
 		if alphaInfo == .none {
 			return isLittleEndian ? .bgr : .rgb
+		log.info("MetalTrimmingContext: Using Metal device: \(device.name)")
+
 		}
 		let alphaIsFirst =
 			alphaInfo == .premultipliedFirst || alphaInfo == .first || alphaInfo == .noneSkipFirst
@@ -115,6 +149,8 @@ extension CGBitmapInfo {
 			return alphaIsFirst ? .bgra : .abgr
 		} else {
 			return alphaIsFirst ? .argb : .rgba
+		log.info("MetalTrimmingContext: CIContext created.")
+
 		}
 	}
 
@@ -132,6 +168,9 @@ extension CGColor {
 			blue: CGFloat(blue) / 255,
 			alpha: CGFloat(alpha) / 255
 		)
+		let log = LoggerProvider.shared.getLogger()
+		log.debug("Attempting to load Metal kernel '\(functionName)'")
+
 	}
 }
 
@@ -172,6 +211,7 @@ extension CIImage {
 			cgImage.bitsPerPixel == 32 || cgImage.bitsPerPixel == 24,
 			"A pixel is expected to be either 4 or 3 bytes in size"
 		)
+		let log = LoggerProvider.shared.getLogger()
 
 		let bytesPerRow = cgImage.bytesPerRow
 		let bytesPerPixel = cgImage.bitsPerPixel / 8
@@ -262,6 +302,7 @@ extension CIImage {
 	func fillColorize(color: CIColor) throws -> CIImage {
 		guard let colorFilter = CIFilter(name: "CIColorMonochrome") else {
 			throw IconAssignmentError.filterFailure(filter: "CIColorMonochrome")
+		let log = LoggerProvider.shared.getLogger()
 		}
 
 		colorFilter.setValue(self, forKey: kCIInputImageKey)
@@ -505,8 +546,6 @@ extension CIImage {
 	}
 }
 
-var logger = Logger(label: "com.philocalyst.iconic")
-
 // Respectful lil function; doesn't print when quiet is enabled
 func quietPrint(_ message: String, isQuiet: Bool) {
 	if !isQuiet {
@@ -515,7 +554,7 @@ func quietPrint(_ message: String, isQuiet: Bool) {
 }
 
 // Define the main command structure
-struct Iconic: @preconcurrency ParsableCommand {
+@main
 
 	// MARK: - Configuration
 
@@ -547,31 +586,31 @@ struct Iconic: @preconcurrency ParsableCommand {
 	@Flag(name: [.short, .long], help: "Suppress all non-error output")
 	var quiet: Bool = false
 
-	@MainActor
 	mutating func run() throws {
+		var log = LoggerProvider.shared.getLogger()
 		if verbose && quiet {
-			logger.warning("Conflicting options: both verbose and quiet flags are enabled")
+			log.warning("Conflicting options: both verbose and quiet flags are enabled")
 			print("ERROR CONFLICTING OPTIONS")
 		} else if verbose {
-			logger.logLevel = Logger.Level.trace
-			logger.info("Verbose logging enabled")
+			log.logLevel = Logger.Level.trace
+			log.info("Verbose logging enabled")
 		} else if quiet {
-			logger.logLevel = Logger.Level.error
-			logger.info("Quiet mode enabled - suppressing non-error output")
+			log.logLevel = Logger.Level.error
+			log.info("Quiet mode enabled - suppressing non-error output")
 		} else {
 			// Default log level
-			logger.logLevel = Logger.Level.notice
-			logger.info("Using default logging level")
+			log.logLevel = Logger.Level.notice
+			log.info("Using default logging level")
 		}
 	}
 
 	// MARK: - Utility functions for subcommands
 
-	@MainActor
-	@preconcurrency static func validPath(susPath: String?) throws -> URL {  // (Sus)picious Path
-		logger.debug("Validating path: \(susPath ?? "<nil>")")
+	static func validPath(susPath: String?) throws -> URL {  // (Sus)picious Path
+		let log = LoggerProvider.shared.getLogger()
+		log.debug("Validating path: \(susPath ?? "<nil>")")
 		guard let path = susPath, !path.isEmpty else {
-			logger.error("Invalid path: nil or empty")
+			log.error("Invalid path: nil or empty")
 			throw IconAssignmentError.invalidIconPath(
 				path: susPath ?? "<nil or empty>",
 				reason: "Path cannot be nil or empty")
@@ -581,13 +620,13 @@ struct Iconic: @preconcurrency ParsableCommand {
 		var isIconDirectory: ObjCBool = false
 
 		guard FileManager.default.fileExists(atPath: path, isDirectory: &isIconDirectory) else {
-			logger.error("Path does not exist: \(path)")
+			log.error("Path does not exist: \(path)")
 			throw IconAssignmentError.invalidIconPath(path: path, reason: "File does not exist")
 		}
 
 		// Use 'path' for file system checks
 		guard FileManager.default.isWritableFile(atPath: path) else {
-			logger.error("Path is not writable: \(path)")
+			log.error("Path is not writable: \(path)")
 			throw IconAssignmentError.permissionDenied(
 				path: path,
 				operation: "write/set attributes"
@@ -595,44 +634,42 @@ struct Iconic: @preconcurrency ParsableCommand {
 		}
 
 		guard FileManager.default.isReadableFile(atPath: path) else {
-			logger.error("Path is not readable: \(path)")
+			log.error("Path is not readable: \(path)")
 			throw IconAssignmentError.permissionDenied(path: path, operation: "read")
 		}
 
-		logger.debug("Path validated successfully: \(path)")
+		log.debug("Path validated successfully: \(path)")
 		return susURL
 	}
 
-	@MainActor
-	@preconcurrency
 	static func createImage(imagePath: String?) throws -> NSImage {
+		let log = LoggerProvider.shared.getLogger()
 		// Validate base path
 		let imageURL: URL
 		do {
-			logger.debug("Attempting to create image from path: \(imagePath ?? "<nil>")")
+			log.debug("Attempting to create image from path: \(imagePath ?? "<nil>")")
 			imageURL = try validPath(susPath: imagePath)
 			guard let inputImg = NSImage(contentsOf: imageURL) else {
-				logger.error("Failed to load image at \(imageURL.path)")
+				log.error("Failed to load image at \(imageURL.path)")
 				print("Error: Could not load image or invalid image format at \(imageURL.path)")
 				throw IconAssignmentError.invalidImage(path: imageURL.path)
 			}
-			logger.info("Successfully loaded image from \(imageURL.path)")
+			log.info("Successfully loaded image from \(imageURL.path)")
 			return inputImg
 		} catch {
-			logger.error("Error creating image: \(error)")
+			log.error("Error creating image: \(error)")
 			print(error)
 			throw IconAssignmentError.invalidImage(path: imagePath ?? "unknown")
 		}
 	}
 
-	@MainActor
-	@preconcurrency
 	static func scales(image: NSImage) -> Bool {
+		let log = LoggerProvider.shared.getLogger()
 		// Multiples required for perfect mapping to the smallest size
 		let result =
 			(image.size.height == 384
 				&& (image.size.width.truncatingRemainder(dividingBy: 128) == 0))
-		logger.debug(
+		log.debug(
 			"Image scaling check: height=\(image.size.height), width=\(image.size.width), result=\(result)"
 		)
 		return result
@@ -641,7 +678,7 @@ struct Iconic: @preconcurrency ParsableCommand {
 
 // MARK: - GetIcon Subcommand
 
-struct GetIcon: @preconcurrency ParsableCommand {
+struct GetIcon: ParsableCommand {
 	static let configuration = CommandConfiguration(
 		commandName: "get",
 		abstract: "Extract an icon from a file or folder"
@@ -661,10 +698,10 @@ struct GetIcon: @preconcurrency ParsableCommand {
 	@Flag(name: [.short, .long], help: "Reveal the extracted icon in Finder")
 	var reveal: Bool = false
 
-	@MainActor
 	mutating func run() throws {
-		logger.info("GetIcon command started")
-		logger.debug(
+		let log = LoggerProvider.shared.getLogger()
+		log.info("GetIcon command started")
+		log.debug(
 			"Parameters - source: \(source), outputIcns: \(outputIcns ?? "nil"), outputIconset: \(outputIconset ?? "nil"), reveal: \(reveal)"
 		)
 
@@ -672,13 +709,13 @@ struct GetIcon: @preconcurrency ParsableCommand {
 
 		// Validate the source path
 		let sourceURL = try Iconic.validPath(susPath: source)
-		logger.info("Source path validated: \(sourceURL.path)")
+		log.info("Source path validated: \(sourceURL.path)")
 
 		// Get the icon from the file or folder
 		// NSWorkspace.shared.icon(forFile:) returns NSImage, not optional
-		logger.debug("Attempting to get icon from file: \(sourceURL.path)")
+		log.debug("Attempting to get icon from file: \(sourceURL.path)")
 		let icon = NSWorkspace.shared.icon(forFile: sourceURL.path)
-		logger.info("Successfully retrieved icon from \(sourceURL.path)")
+		log.info("Successfully retrieved icon from \(sourceURL.path)")
 
 		// Determine output paths
 		let outputIcnsURL = outputIcns.map { URL(fileURLWithPath: $0) }
@@ -688,24 +725,24 @@ struct GetIcon: @preconcurrency ParsableCommand {
 		if let icnsPath = outputIcnsURL {
 			// Code to save as .icns would go here
 			if options.verbose {
-				logger.debug("About to save icon to \(icnsPath.path)")
+				log.debug("About to save icon to \(icnsPath.path)")
 				print("Saving icon to \(icnsPath.path)")
 			}
 
 			// Placeholder for actual implementation
-			logger.info("Icon saved to \(icnsPath.path)")
+			log.info("Icon saved to \(icnsPath.path)")
 			quietPrint("Icon saved to \(icnsPath.path)", isQuiet: options.quiet)
 		}
 
 		if let iconsetPath = outputIconsetURL {
 			// Code to save as .iconset would go here
 			if options.verbose {
-				logger.debug("About to save iconset to \(iconsetPath.path)")
+				log.debug("About to save iconset to \(iconsetPath.path)")
 				print("Saving iconset to \(iconsetPath.path)")
 			}
 
 			// Placeholder for actual implementation
-			logger.info("Iconset saved to \(iconsetPath.path)")
+			log.info("Iconset saved to \(iconsetPath.path)")
 			quietPrint("Iconset saved to \(iconsetPath.path)", isQuiet: options.quiet)
 		}
 
@@ -715,12 +752,12 @@ struct GetIcon: @preconcurrency ParsableCommand {
 				"\(sourceURL.lastPathComponent).icns")
 			// Save to default location
 			if options.verbose {
-				logger.debug("No output path specified, using default: \(defaultIcnsURL.path)")
+				log.debug("No output path specified, using default: \(defaultIcnsURL.path)")
 				print("No output path specified, saving to \(defaultIcnsURL.path)")
 			}
 
 			// Placeholder for actual implementation
-			logger.info("Icon saved to default location: \(defaultIcnsURL.path)")
+			log.info("Icon saved to default location: \(defaultIcnsURL.path)")
 			quietPrint("Icon saved to \(defaultIcnsURL.path)", isQuiet: options.quiet)
 		}
 
@@ -729,20 +766,20 @@ struct GetIcon: @preconcurrency ParsableCommand {
 			// Determine which file to reveal (in order of preference: icns, iconset)
 			let fileToReveal = outputIcnsURL ?? outputIconsetURL
 			if let revealURL = fileToReveal {
-				logger.info("Revealing file in Finder: \(revealURL.path)")
+				log.info("Revealing file in Finder: \(revealURL.path)")
 				NSWorkspace.shared.selectFile(revealURL.path, inFileViewerRootedAtPath: "")
 			} else {
-				logger.warning("Reveal flag set but no file to reveal")
+				log.warning("Reveal flag set but no file to reveal")
 			}
 		}
 
-		logger.info("GetIcon command completed successfully")
+		log.info("GetIcon command completed successfully")
 	}
 }
 
 // MARK: - SetIcon Subcommand
 
-struct SetIcon: @preconcurrency ParsableCommand {
+struct SetIcon: ParsableCommand {
 	static let configuration = CommandConfiguration(
 		commandName: "set",
 		abstract: "Apply an icon to a file or folder"
@@ -759,41 +796,41 @@ struct SetIcon: @preconcurrency ParsableCommand {
 	@Flag(name: [.short, .long], help: "Reveal the target in Finder after applying the icon")
 	var reveal: Bool = false
 
-	@MainActor
 	mutating func run() throws {
-		logger.info("SetIcon command started")
-		logger.debug("Parameters - icon: \(icon), target: \(target), reveal: \(reveal)")
+		let log = LoggerProvider.shared.getLogger()
+		log.info("SetIcon command started")
+		log.debug("Parameters - icon: \(icon), target: \(target), reveal: \(reveal)")
 
 		quietPrint("Setting icon \(icon) on \(target)...", isQuiet: options.quiet)
 
 		// Validate paths
 		let iconURL = try Iconic.validPath(susPath: icon)
 		let targetURL = try Iconic.validPath(susPath: target)
-		logger.info("Paths validated - icon: \(iconURL.path), target: \(targetURL.path)")
+		log.info("Paths validated - icon: \(iconURL.path), target: \(targetURL.path)")
 
 		// Check write permissions for the target item itself
 		guard FileManager.default.isWritableFile(atPath: targetURL.path) else {
-			logger.error("Permission denied: Cannot write to target \(targetURL.path)")
+			log.error("Permission denied: Cannot write to target \(targetURL.path)")
 			throw IconAssignmentError.permissionDenied(
 				path: targetURL.path, operation: "write/set attributes")
 		}
 
 		guard let iconImage = NSImage(contentsOf: iconURL) else {
-			logger.error("Failed to load icon image from \(iconURL.path)")
+			log.error("Failed to load icon image from \(iconURL.path)")
 			throw IconAssignmentError.iconLoadFailed(path: iconURL.path)
 		}
-		logger.info("Successfully loaded icon image from \(iconURL.path)")
+		log.info("Successfully loaded icon image from \(iconURL.path)")
 
 		if options.verbose {
-			logger.debug("About to apply icon to \(targetURL.path)")
+			log.debug("About to apply icon to \(targetURL.path)")
 			print("Applying icon to \(targetURL.path)")
 		}
 
-		logger.debug("Calling NSWorkspace.setIcon")
+		log.debug("Calling NSWorkspace.setIcon")
 		let success = NSWorkspace.shared.setIcon(iconImage, forFile: targetURL.path, options: [])
 
 		guard success else {
-			logger.error("NSWorkspace.setIcon failed for \(targetURL.path)")
+			log.error("NSWorkspace.setIcon failed for \(targetURL.path)")
 			throw IconAssignmentError.iconSetFailed(
 				path: targetURL.path,
 				reason:
@@ -801,21 +838,22 @@ struct SetIcon: @preconcurrency ParsableCommand {
 			)
 		}
 
-		logger.info("Successfully applied icon to \(targetURL.path)")
+		log.info("Successfully applied icon to \(targetURL.path)")
 		quietPrint("Successfully applied icon to \(targetURL.path)", isQuiet: options.quiet)
 
 		if reveal {
-			logger.info("Revealing target in Finder: \(targetURL.path)")
+			log.info("Revealing target in Finder: \(targetURL.path)")
 			NSWorkspace.shared.selectFile(targetURL.path, inFileViewerRootedAtPath: "")
 		}
 
-		logger.info("SetIcon command completed successfully")
+		log.info("SetIcon command completed successfully")
 	}
 }
 
 // MARK: - MaskIcon Subcommand (formerly the main command)
 
-struct MaskIcon: @preconcurrency ParsableCommand {
+struct MaskIcon: ParsableCommand {
+
 	static let configuration = CommandConfiguration(
 		commandName: "mask",
 		abstract: "Apply a mask image to create a macOS folder icon",
@@ -892,23 +930,23 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 	// MARK: - Run Method (Main Logic)
 
-	@MainActor
-	mutating func run() {
-		logger.info("MaskIcon command started")
-		logger.debug(
+	mutating func run() async {
+		let log = LoggerProvider.shared.getLogger()
+		log.info("MaskIcon command started")
+		log.debug(
 			"Parameters - mask: \(mask), target: \(target ?? "nil"), outputIcns: \(outputIcns ?? "nil"), outputIconset: \(outputIconset ?? "nil")"
 		)
-		logger.debug(
+		log.debug(
 			"Additional parameters - reveal: \(reveal), macOS: \(macOS ?? "nil"), colorScheme: \(colorScheme), noTrim: \(noTrim)"
 		)
 
 		do {
 			if options.verbose {
-				logger.debug("About to process mask image: \(mask)")
+				log.debug("About to process mask image: \(mask)")
 				print("Processing mask image at \(mask)")
 			}
 
-			logger.info("Loading input image from \(mask)")
+			log.info("Loading input image from \(mask)")
 			let maskImage = try Iconic.createImage(imagePath: mask)
 			let folderImage = try Iconic.createImage(
 				imagePath: determineBasePath(version: "bigsur", color: colorScheme))
@@ -930,18 +968,18 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 			}
 
 			if options.verbose {
-				logger.debug("Image loaded successfully")
+				log.debug("Image loaded successfully")
 				print("Image loaded successfully")
-				logger.debug("Checking if image scales perfectly")
-				print("Image scales perfectly: \(Iconic.scales(image: inputImage))")
+				log.debug("Checking if image scales perfectly")
+				print("Image scales perfectly: \(Iconic.scales(image: maskImage))")
 			}
 
 			// Implement masking logic here
-			logger.info("Performing masking operation")
+			log.info("Performing masking operation")
 
 			// Apply to target if specified
 			if let targetPath = target {
-				logger.info("Target specified, will apply icon to: \(targetPath)")
+				log.info("Target specified, will apply icon to: \(targetPath)")
 				quietPrint("Applying masked icon to \(targetPath)", isQuiet: options.quiet)
 
 				// Logic to apply the icon to the target
@@ -950,14 +988,13 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 			// Save output files if specified
 			if let icnsPath = outputIcns {
-				logger.info("Saving masked icon to specified .icns path: \(icnsPath)")
-				quietPrint("Saving masked icon to \(icnsPath)", isQuiet: options.quiet)
+				log.info("Saving masked icon to specified .icns path: \(icnsPath)")
 
 				// Logic to save as .icns
 			}
 
 			if let iconsetPath = outputIconset {
-				logger.info("Saving masked icon to specified .iconset path: \(iconsetPath)")
+				log.info("Saving masked icon to specified .iconset path: \(iconsetPath)")
 				quietPrint(
 					"Saving masked icon as iconset to \(iconsetPath)", isQuiet: options.quiet)
 
@@ -981,7 +1018,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				let defaultPath = maskURL.deletingLastPathComponent().appendingPathComponent(
 					"\(maskURL.deletingPathExtension().lastPathComponent)-masked.icns")
 
-				logger.info(
+				log.info(
 					"No target or output specified, using default location: \(defaultPath.path)")
 				quietPrint(
 					"Saving masked icon to default location: \(defaultPath.path)",
@@ -1010,21 +1047,19 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				}
 
 				if let revealPath = pathToReveal {
-					logger.info("Revealing file in Finder: \(revealPath)")
+					log.info("Revealing file in Finder: \(revealPath)")
 					NSWorkspace.shared.selectFile(revealPath, inFileViewerRootedAtPath: "")
 				}
 			}
 
-			logger.info("MaskIcon command completed successfully")
+			log.info("MaskIcon command completed successfully")
 
 		} catch {
-			logger.error("Error in MaskIcon: \(error)")
+			log.error("Error in MaskIcon: \(error)")
 			print("Error: \(error)")
 		}
 	}
 
-	@MainActor
-	@preconcurrency
 	func getAllCIImages(from nsImage: NSImage) -> [CIImage] {
 		// Iterate through all the representations, $0 represents the current.
 		// Mutate into bitmap representation.
@@ -1035,8 +1070,6 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		}
 	}
 
-	@MainActor
-	@preconcurrency
 	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
 		try validateImageExtents(mask: mask, base: base)
 
@@ -1064,8 +1097,6 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		}
 	}
 
-	@MainActor
-	@preconcurrency
 	func determineBasePath(version: String, color: ColorScheme) -> String {
 		let type = "folder"
 		var swatch: String
@@ -1085,8 +1116,6 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		print("\(resourcesPath)\(version)-\(type)-\(swatch).icns")
 		return "\(resourcesPath)\(version)-\(type)-\(swatch).icns"
 	}
-	@MainActor
-	@preconcurrency
 	func isDarkMode() -> Bool {
 		let appearance = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
 		return appearance == "Dark"
