@@ -50,6 +50,19 @@ let resourcesPath: String? = ProcessInfo.processInfo.environment["HOME"].map { h
 	"\(homeDir)/.local/share/\(appName)/"
 }
 
+struct EngravingInputs {
+	let fillColor: CIColor
+	let topBezel: BezelSettings
+	let bottomBezel: BezelSettings
+
+	struct BezelSettings {
+		let color: CIColor
+		let blur: CGFloat
+		let maskOperation: String
+		let opacity: CGFloat
+	}
+}
+
 enum ImageTrimError: LocalizedError {
 	case metalInitializationFailed(String)
 	case bufferCreationFailed
