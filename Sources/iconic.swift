@@ -163,6 +163,7 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 	}
 }
 
+@MainActor
 @preconcurrency final class MetalTrimmingContext {
 
 	let log = LoggerProvider.shared.getLogger()
@@ -287,6 +288,7 @@ extension CIImage {
 	/// Returning a bounding box as a CGRect that correspounds to the image's coordinate space from its extent origin.
 	// If the image is fully transparent, has no dimensions, or has infinite extent; returns as a CGRect.null.
 	/// Throwing erros as ImageTrimError
+	@MainActor
 	func getAliveImage() throws -> CGRect {
 		let log = LoggerProvider.shared.getLogger()
 		let metalContext = MetalTrimmingContext.shared  // Get shared context
@@ -978,7 +980,7 @@ struct SetIcon: ParsableCommand {
 
 // MARK: - MaskIcon Subcommand (formerly the main command)
 
-struct MaskIcon: ParsableCommand {
+struct MaskIcon: @preconcurrency ParsableCommand {
 
 	static let configuration = CommandConfiguration(
 		commandName: "mask",
@@ -1056,7 +1058,8 @@ struct MaskIcon: ParsableCommand {
 
 	// MARK: - Run Method (Main Logic)
 
-	mutating func run() async {
+	@MainActor
+	mutating func run() {
 		let log = LoggerProvider.shared.getLogger()
 		log.info("MaskIcon command started")
 		log.debug(
@@ -1196,10 +1199,11 @@ struct MaskIcon: ParsableCommand {
 		}
 	}
 
-	func iconify(mask: CIImage, base: CIImage) async throws -> CIImage {
+	@MainActor
+	func iconify(mask: CIImage, base: CIImage) throws -> CIImage {
 		try validateImageExtents(mask: mask, base: base)
 
-		let cropped_base = try await cropPadding(image: base)
+		let cropped_base = try cropPadding(image: base)
 
 		let resizedMask = try mask.resize(
 			atRatio: 0.5, relativeTo: cropped_base.extent.size)
@@ -1247,11 +1251,12 @@ struct MaskIcon: ParsableCommand {
 		return appearance == "Dark"
 	}
 
-	func cropPadding(image: CIImage) async throws -> CIImage {
+	@MainActor
+	func cropPadding(image: CIImage) throws -> CIImage {
 		print("Creating Metal texture...")
 
 		print("Running Metal kernel to find bounding box...")
-		let boundingBox = try await image.getAliveImage()  // Timing is inside here now
+		let boundingBox = try image.getAliveImage()  // Timing is inside here now
 
 		let croppedImage = image.cropped(to: boundingBox)
 		return croppedImage
@@ -1402,4 +1407,3 @@ struct MaskIcon: ParsableCommand {
 
 }
 
-Iconic.main()
