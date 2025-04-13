@@ -256,30 +256,183 @@ enum IconAssignmentError: Error, CustomStringConvertible {
 // MARK: - CIImage Extension (Existing + New Metal Bounding Box)
 extension CIImage {
 
+	func fillColorize(color: CIColor) throws -> CIImage {
+		guard let colorFilter = CIFilter(name: "CIColorMonochrome") else {
+			throw IconAssignmentError.filterFailure(filter: "CIColorMonochrome")
+		}
+		colorFilter.setValue(self, forKey: kCIInputImageKey)
+		colorFilter.setValue(color, forKey: kCIInputColorKey)
+		colorFilter.setValue(1.0, forKey: kCIInputIntensityKey)  // Full intensity
+		guard let outputImage = colorFilter.outputImage else {
+			throw IconAssignmentError.imageConversionFailed(description: "Failed to colorize image")
+		}
+		return outputImage.cropped(to: self.extent)
 	}
 
-	var pixelHeight: Int {
-		return cgImage?.height ?? 0
+	func dissolve(onto background: CIImage, opacity: CGFloat) throws -> CIImage {
+		// Clamp opacity
+		let clampedOpacity = max(0.0, min(1.0, opacity))
+
+		// Create a solid color image with the foreground's opacity
+		let mask = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: clampedOpacity))
+			.cropped(to: self.extent)  // Match foreground size
+
+		// Blend foreground and background using the opacity mask
+		return self.applyingFilter(
+			"CIBlendWithMask",
+			parameters: [
+				kCIInputBackgroundImageKey: background,
+				kCIInputMaskImageKey: mask,
+			])
 	}
 
+	func applyOpacity(_ opacity: CGFloat) throws -> CIImage {
+		// Clamp opacity
+		let clampedOpacity = max(0.0, min(1.0, opacity))
+		// Use simple alpha multiplication filter
+		return self.applyingFilter(
+			"CIColorMatrix",
+			parameters: [
+				"inputAVector": CIVector(x: 0, y: 0, z: 0, w: clampedOpacity)
+			])
+	}
 
-
+	func composite(
+		over background: CIImage, operation: String = "sourceOver", opacity: CGFloat = 1.0
+	) throws -> CIImage {
 		let log = LoggerProvider.shared.getLogger()
 
+		// Apply opacity to the foreground image first if opacity < 1.0
+		let foreground = try (opacity < 1.0) ? self.applyOpacity(opacity) : self
 
+		let filterName: String
+		switch operation.lowercased() {
+		// Traditional Compositing
+		case "sourceover", "default": filterName = "CISourceOverCompositing"
+		case "sourcein": filterName = "CISourceInCompositing"
+		case "sourceout": filterName = "CISourceOutCompositing"
+		case "sourceatop": filterName = "CISourceAtopCompositing"
+		case "minimum": filterName = "CIMinimumCompositing"
+		case "maximum": filterName = "CIMaximumCompositing"
+		case "addition": filterName = "CIAdditionCompositing"
+		case "multiplycompositing": filterName = "CIMultiplyCompositing"
+
+		// ▰▰▰ Blend Modes ▰▰▰ //
+
+		// Standard Blends
+		case "multiply": filterName = "CIMultiplyBlendMode"
+		case "screen": filterName = "CIScreenBlendMode"
+		case "overlay": filterName = "CIOverlayBlendMode"
+		case "darken": filterName = "CIDarkenBlendMode"
+		case "lighten": filterName = "CILightenBlendMode"
+
+		// Dodge & Burn Blends
+		case "colordodge": filterName = "CIColorDodgeBlendMode"
+		case "colorburn": filterName = "CIColorBurnBlendMode"
+		case "linearburn": filterName = "CILinearBurnBlendMode"
+		case "lineardodge": filterName = "CILinearDodgeBlendMode"
+
+		// Light Blends
+		case "softlight": filterName = "CISoftLightBlendMode"
+		case "hardlight": filterName = "CIHardLightBlendMode"
+		case "vividlight": filterName = "CIVividLightBlendMode"
+		case "linearlight": filterName = "CILinearLightBlendMode"
+		case "pinlight": filterName = "CIPinLightBlendMode"
+
+		// Difference Blends
+		case "difference": filterName = "CIDifferenceBlendMode"
+		case "exclusion": filterName = "CIExclusionBlendMode"
+		case "subtract": filterName = "CISubtractBlendMode"
+		case "divide": filterName = "CIDivideBlendMode"
+
+		// HSL Color Blends
+		case "hue": filterName = "CIHueBlendMode"
+		case "saturation": filterName = "CISaturationBlendMode"
+		case "color": filterName = "CIColorBlendMode"
+		case "luminosity": filterName = "CILuminosityBlendMode"
+
+		// Custom dissolve handled separately now
+		case "dissolve":
+			return try foreground.dissolve(onto: background, opacity: opacity)  // Use opacity here directly
+
+		default:
+			log.warning(
+				"Unknown composite operation '\(operation)'. Defaulting to CISourceOverCompositing."
 			)
+			filterName = "CISourceOverCompositing"
+		}
 
+		guard let filter = CIFilter(name: filterName) else {
+			throw IconAssignmentError.filterFailure(filter: filterName)
+		}
 
+		filter.setValue(foreground, forKey: kCIInputImageKey)
+		filter.setValue(background, forKey: kCIInputBackgroundImageKey)
 
+		guard let outputImage = filter.outputImage else {
+			throw IconAssignmentError.imageConversionFailed(
+				description: "Failed to composite images using \(filterName)")
+		}
+		return outputImage
+	}
 
+	func negate() throws -> CIImage {
+		return self.applyingFilter("CIColorInvert")
+			.cropped(to: self.extent)  // Preserve extent
+	}
 
+	func blurDown(radius: CGFloat) throws -> CIImage {
+		// Clamp radius to avoid excessive computation or artifacts
+		let clampedRadius = max(0, radius)
+		return self.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: clampedRadius])
+	}
 
+	func maskDown(mask: CIImage, operation: String) throws -> CIImage {
+		switch operation.lowercased() {
+		case "multiply", "blend", "default":
+			return self.applyingFilter(
+				"CIBlendWithMask",
+				parameters: [
+					kCIInputBackgroundImageKey: CIImage.empty().cropped(to: self.extent),  // Use empty background of same size
+					kCIInputMaskImageKey: mask,
+				])
 
+		case "dst-in", "sourcein":
+			return self.applyingFilter(
+				"CISourceInCompositing",
+				parameters: [
+					kCIInputBackgroundImageKey: mask
+				])
 
+		case "dst-out", "sourceout":
+			return self.applyingFilter(
+				"CISourceOutCompositing",
+				parameters: [
+					kCIInputBackgroundImageKey: mask
+				])
 
-		} else {
-			assertionFailure("Unsupported number of pixel components")
-			return CGColor(gray: 0, alpha: 0)
+		case "darken":
+			return self.applyingFilter(
+				"CIDarkenBlendMode",
+				parameters: [
+					kCIInputBackgroundImageKey: mask
+				])
+		case "lighten":
+			return self.applyingFilter(
+				"CILightenBlendMode",
+				parameters: [
+					kCIInputBackgroundImageKey: mask
+				])
+		case "multiplyblend":  // Actual multiply blend mode (vs alpha blend)
+			return self.applyingFilter(
+				"CIMultiplyBlendMode",
+				parameters: [
+					kCIInputBackgroundImageKey: mask
+				])
+
+		default:
+			throw IconAssignmentError.invalidImageExtent(
+				operation: "maskDown", reason: "Unknown mask operation: \(operation)")
 		}
 	}
 
@@ -507,21 +660,6 @@ extension CIImage {
 		return self.transformed(by: transform)
 	}
 
-	/// Adjusts the opacity of the image
-	func applyOpacity(_ opacity: CGFloat) throws -> CIImage {
-		let outputImage = self.applyingFilter(
-			"CIColorMatrix",
-			parameters: [
-				"inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
-				"inputGVector": CIVector(x: 0, y: 1, z: 0, w: 0),
-				"inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0),
-				"inputAVector": CIVector(x: 0, y: 0, z: 0, w: opacity),
-				"inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-			])
-
-		return outputImage
-	}
-
 	func engrave(sizeMask: CIImage, templateIcon: CIImage, inputs: EngravingInputs) throws
 		-> CIImage
 	{
@@ -554,122 +692,12 @@ extension CIImage {
 
 		// Engraving
 		let compositedWithBottom = try templateIcon.composite(
-			over: bottomBezel, operation: "dissolve")
+			over: bottomBezel, operation: "dissolve", opacity: 0.5)
 
 		let compositedWithFill = try compositedWithBottom.composite(
-			over: fill, operation: "dissolve")
+			over: fill, operation: "dissolve", opacity: 0.5)
 
 		return try compositedWithFill.composite(over: topBezel, operation: "dissolve")
-	}
-
-	func composite(over background: CIImage, operation: String = "dissolve") throws -> CIImage {
-		let filterName: String
-
-		switch operation {
-		case "dissolve":
-			filterName = "CISourceOverCompositing"
-		case "multiply":
-			filterName = "CIMultiplyBlendMode"
-		case "screen":
-			filterName = "CIScreenBlendMode"
-		case "overlay":
-			filterName = "CIOverlayBlendMode"
-		default:
-			filterName = "CISourceOverCompositing"
-		}
-
-		guard let filter = CIFilter(name: filterName) else {
-			throw IconAssignmentError.filterFailure(filter: filterName)
-		}
-
-		filter.setValue(self, forKey: kCIInputImageKey)
-		filter.setValue(background, forKey: kCIInputBackgroundImageKey)
-
-		guard let outputImage = filter.outputImage else {
-			throw IconAssignmentError.imageConversionFailed(
-				description: "Failed to composite images")
-		}
-
-		return outputImage
-	}
-
-	func negate() throws -> CIImage {
-		let outputImage = self.applyingFilter("CIColorInvert")
-		return outputImage
-	}
-
-	func blurDown(radius: CGFloat) throws -> CIImage {
-		let outputImage = self.applyingFilter(
-			"CIGaussianBlur", parameters: ["inputRadius": radius])
-
-		return outputImage
-	}
-
-	func maskDown(mask: CIImage, operation: String) throws -> CIImage {
-		switch operation {
-		case "multiply", "default":
-			guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
-				throw IconAssignmentError.filterFailure(filter: "CIBlendWithMask")
-			}
-
-			blendFilter.setValue(self, forKey: kCIInputImageKey)
-			blendFilter.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
-			blendFilter.setValue(mask, forKey: kCIInputMaskImageKey)
-
-			guard let outputImage = blendFilter.outputImage else {
-				throw IconAssignmentError.imageConversionFailed(description: "Failed to mask image")
-			}
-
-			return outputImage
-
-		case "dst-in":
-
-			guard let dstInFilter = CIFilter(name: "CISourceOutCompositing") else {
-				throw IconAssignmentError.filterFailure(filter: "CISourceOutCompositing")
-			}
-
-			dstInFilter.setValue(self, forKey: kCIInputImageKey)
-			dstInFilter.setValue(mask, forKey: kCIInputBackgroundImageKey)
-
-			guard let outputImage = dstInFilter.outputImage else {
-				throw IconAssignmentError.imageConversionFailed(
-					description: "Failed to composite image")
-			}
-
-			return outputImage
-		case "dst-out":
-			guard let dstOutFilter = CIFilter(name: "CISourceInCompositing") else {
-				throw IconAssignmentError.filterFailure(filter: "CISourceInCompositing")
-			}
-
-			dstOutFilter.setValue(self, forKey: kCIInputImageKey)
-			dstOutFilter.setValue(mask, forKey: kCIInputBackgroundImageKey)
-
-			guard let outputImage = dstOutFilter.outputImage else {
-				throw IconAssignmentError.imageConversionFailed(
-					description: "Failed to composite image")
-			}
-
-			return outputImage
-		case "darken":
-			guard let darkenFilter = CIFilter(name: "CIDarkenBlendMode") else {
-				throw IconAssignmentError.filterFailure(filter: "CIDarkenBlendMode")
-			}
-
-			darkenFilter.setValue(self, forKey: kCIInputImageKey)
-			darkenFilter.setValue(mask, forKey: kCIInputBackgroundImageKey)
-
-			guard let outputImage = darkenFilter.outputImage else {
-				throw IconAssignmentError.imageConversionFailed(
-					description: "Failed to darken mask image")
-			}
-
-			return outputImage
-
-		default:
-			throw IconAssignmentError.invalidImageExtent(
-				operation: "maskDown", reason: "Unknown mask operation: \(operation)")
-		}
 	}
 }
 
@@ -715,6 +743,7 @@ struct Iconic: ParsableCommand {
 	var quiet: Bool = false
 
 	mutating func run() throws {
+		print("hi")
 		var log = LoggerProvider.shared.getLogger()
 		if verbose && quiet {
 			log.warning("Conflicting options: both verbose and quiet flags are enabled")
@@ -1082,17 +1111,19 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 			let maskIcons = getAllCIImages(from: maskImage)
 			let folderIcons = getAllCIImages(from: folderImage)
-			let maskk = try cropTransparentPadding(image: maskIcons[0])
 
 			var convertedIcons: [CIImage] = []
 
 			if maskIcons.count == folderIcons.count {
 				for (mask, folder) in zip(maskIcons, folderIcons) {
-					try convertedIcons.append(iconify(mask: mask, base: folder))
+					let convertedImage = try iconify(mask: mask, base: folder)
+					convertedIcons.append(convertedImage)
 				}
 			} else {
 				for base in folderIcons {
-					try convertedIcons.append(iconify(mask: maskk, base: base))
+					let mask = maskIcons[0]  // Get the first (largest) from the set
+					let convertedImage = try iconify(mask: mask, base: base)
+					convertedIcons.append(convertedImage)
 				}
 			}
 
@@ -1210,7 +1241,32 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 		let centeredMask = try resizedMask.center(overBase: cropped_base)
 
+		let fillColor = CIColor(red: 8, green: 134, blue: 206)
+
+		// Create the engraving inputs
+		let engravingInputs = EngravingInputs(
+			fillColor: fillColor,
+			topBezel: EngravingInputs.BezelSettings(
+				color: CIColor(red: 58 / 255.0, green: 152 / 255.0, blue: 208 / 255.0),
+				blur: 0.7,  // Using page_y value from the Rust code
+				maskOperation: "dst-in",  // Equivalent to CompositingOperation::Dst_In
+				opacity: 90
+			),
+			bottomBezel: EngravingInputs.BezelSettings(
+				color: CIColor(red: 174 / 255.0, green: 225 / 255.0, blue: 253 / 255.0),
+				blur: 5.0,  // Would need to be calculated based on resolution
+				maskOperation: "dst-out",  // Equivalent to CompositingOperation::Dst_Out
+				opacity: 70  // Would need to be calculated based on resolution
+			)
 		)
+
+		var engravedImage: CIImage
+		engravedImage = try resizedMask.engrave(
+			sizeMask: centeredMask,
+			templateIcon: cropped_base,
+			inputs: engravingInputs
+		)
+		return try engravedImage.composite(over: base, operation: "overlay")
 	}
 
 	func validateImageExtents(mask: CIImage, base: CIImage) throws {
@@ -1243,8 +1299,11 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				swatch = "light"
 			}
 		}
-		print("\(resourcesPath)\(version)-\(type)-\(swatch).icns")
-		return "\(resourcesPath)\(version)-\(type)-\(swatch).icns"
+		if let folderPath = resourcesPath {
+			let basePath = "\(folderPath)\(version)-\(type)-\(swatch).icns"
+			return basePath
+		}
+		return "NA"
 	}
 	func isDarkMode() -> Bool {
 		let appearance = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
