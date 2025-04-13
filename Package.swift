@@ -22,8 +22,7 @@ let package = Package(
                 "SwiftVips",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]
+            ],
         )
     ]
-
 )

@@ -1466,3 +1466,13 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 
 }
 
+func writeAtPath(image: CIImage) throws {
+	let path = "/Users/philocalyst/bash.png"
+	let icnsURL = URL(fileURLWithPath: path)
+	let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+	let context = CIContext()
+	try context.writePNGRepresentation(
+		of: image, to: icnsURL,
+		format: .RGBA8,
+		colorSpace: colorSpace)
+}
