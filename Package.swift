@@ -19,10 +19,10 @@ let package = Package(
         .executableTarget(
             name: "iconic",
             dependencies: [
-                "SwiftVips",
-                .product(name: "Logging", package: "swift-log"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
             ],
+            path: "Sources"
         )
     ]
 )
