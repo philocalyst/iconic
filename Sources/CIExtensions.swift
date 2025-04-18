@@ -1,22 +1,38 @@
 import CoreImage
 import Foundation
 
+/// Represents an x,y offset position
+struct Offset {
+    let x: Int
+    let y: Int
+
+    func toString() -> String {
+        return "\(x)x\(y)"
+    }
+}
+
 /// Parameters for the "engraving" step.
 public struct EngravingInputs {
+    /// Parameters for the blur down effect
+    public struct BlurDown {
+        let spreadPx: UInt32
+        let pageY: Int
+    }
+
     public struct Bezel {
         public let color: CIColor
-        public let blurRadius: CGFloat
+        public let blur: BlurDown
         public let maskOp: String
         public let opacity: CGFloat
 
         public init(
             color: CIColor,
-            blurRadius: CGFloat,
+            blur: BlurDown,
             maskOp: String,
             opacity: CGFloat
         ) {
             self.color = color
-            self.blurRadius = blurRadius
+            self.blur = blur
             self.maskOp = maskOp
             self.opacity = opacity
         }

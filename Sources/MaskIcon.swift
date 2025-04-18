@@ -64,15 +64,15 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				fillColor: CIColor(red: 8 / 255, green: 134 / 255, blue: 206 / 255),
 				topBezel: EngravingInputs.Bezel(
 					color: CIColor(red: 58 / 255, green: 152 / 255, blue: 208 / 255),
-					blurRadius: 0.7,
+					blur: .init(spreadPx: 0, pageY: 2),
 					maskOp: "dst-in",
-					opacity: 0.9
+					opacity: 0.5
 				),
 				bottomBezel: EngravingInputs.Bezel(
 					color: CIColor(red: 174 / 255, green: 225 / 255, blue: 253 / 255),
-					blurRadius: 5.0,
+					blur: .init(spreadPx: 1, pageY: 0),
 					maskOp: "dst-out",
-					opacity: 0.7
+					opacity: 0.5
 				)
 			)
 			let engraved = try crop.engrave(
@@ -99,23 +99,12 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 		}
 
 		if let icnsPath = icns {
-			// create a temp .iconset, run iconutil
-			let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-				.appendingPathComponent(UUID().uuidString + ".iconset")
-			try FileUtils.writeIconset(images: finalImages, to: tmp)
 			let outURL = URL(fileURLWithPath: icnsPath)
-			try FileUtils.runCommand(
-				"/usr/bin/iconutil",
-				args: [
-					"-c", "icns",
-					"-o", outURL.path,
-					tmp.path,
-				])
+			try FileUtils.createICNSFile(from: finalImages, at: outURL)
 			log.info("Wrote icns to \(icnsPath)")
 			if reveal {
 				NSWorkspace.shared.selectFile(icnsPath, inFileViewerRootedAtPath: "")
 			}
-			try? FileManager.default.removeItem(at: tmp)
 		}
 
 		// 6) Optionally apply to target
@@ -127,15 +116,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				// build a temp .icns
 				let tmpI = URL(fileURLWithPath: NSTemporaryDirectory())
 					.appendingPathComponent(UUID().uuidString + ".icns")
-				let tmpSet = tmpI.deletingPathExtension().appendingPathExtension("iconset")
-				try FileUtils.writeIconset(images: finalImages, to: tmpSet)
-				try FileUtils.runCommand(
-					"/usr/bin/iconutil",
-					args: [
-						"-c", "icns",
-						"-o", tmpI.path,
-						tmpSet.path,
-					])
+				try FileUtils.createICNSFile(from: finalImages, at: tmpI)
 				icnsToUse = tmpI
 			}
 
@@ -158,8 +139,6 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				NSWorkspace.shared.selectFile(targetURL.path, inFileViewerRootedAtPath: "")
 			}
 		}
-
-		log.info("MaskIcon completed")
 	}
 
 	private func isDarkMode() -> Bool {
