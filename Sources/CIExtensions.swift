@@ -103,7 +103,7 @@ extension CIImage {
         return
             self
             .motionBlurDown(spreadPx: blurDown.spreadPx)
-            .page(offset: Offset(x: 0, y: blurDown.pageY))
+            .page(offset: Offset(x: 0, y: -blurDown.pageY))
     }
 
     public func tint(color: CIColor) throws -> CIImage {
@@ -122,26 +122,73 @@ extension CIImage {
         return out
     }
 
-    func replacingTransparencyWithWhite() -> CIImage? {
-        // 1. Create a solid white background image of the same size
-        //    as the original image.
-        let whiteBackground = CIImage(color: CIColor.white)
-            .cropped(to: self.extent)
+    /// Returns a CIImage in which the original alpha is inverted:
+    /// transparent → white, opaque → transparent.
+    func invertedAlphaWhiteBackground() -> CIImage? {
+        let extent = self.extent
 
-        // 2. Use the "Source Over" compositing filter.
-        //    This places the original image (`self`) over the white background.
-        //    Transparent areas in the original image will let the white
-        //    background show through.
-        guard let compositeFilter = CIFilter(name: "CISourceOverCompositing") else {
-            print("Error: Could not create CISourceOverCompositing filter.")
+        // 1) Create white & clear images
+        let white = CIImage(color: .white)
+            .cropped(to: extent)
+        let clear = CIImage(
+            color: CIColor(
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 0)
+        )
+        .cropped(to: extent)
+
+        // 2) Extract original alpha into a mask
+        guard
+            let extractAlpha = CIFilter(
+                name: "CIColorMatrix",
+                parameters: [
+                    kCIInputImageKey: self,
+                    "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    // keep only the α channel
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                    "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                ])?.outputImage
+        else {
+            print("Failed to extract alpha")
             return nil
         }
 
-        compositeFilter.setValue(self, forKey: kCIInputImageKey)
-        compositeFilter.setValue(whiteBackground, forKey: kCIInputBackgroundImageKey)
+        // 3) Invert that alpha mask: α → 1 - α
+        guard
+            let invertedMask = CIFilter(
+                name: "CIColorMatrix",
+                parameters: [
+                    kCIInputImageKey: extractAlpha,
+                    // no color channels
+                    "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    // invert alpha
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: -1),
+                    // bias of +1 => 1 - α
+                    "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                ])?.outputImage
+        else {
+            print("Failed to invert alpha")
+            return nil
+        }
 
-        // 3. Return the resulting composited image.
-        return compositeFilter.outputImage
+        // 4) Blend white over clear, using the inverted-mask as the α mask
+        guard
+            let blend = CIFilter(name: "CIBlendWithAlphaMask")
+        else {
+            print("Failed to create CIBlendWithAlphaMask")
+            return nil
+        }
+        blend.setValue(white, forKey: kCIInputImageKey)
+        blend.setValue(clear, forKey: kCIInputBackgroundImageKey)
+        blend.setValue(invertedMask, forKey: kCIInputMaskImageKey)
+
+        return blend.outputImage
     }
 
     /// Fills the image with the provided color
@@ -169,6 +216,10 @@ extension CIImage {
 
         // 3) Crop back to the original image’s extent
         return output.cropped(to: extent)
+    }
+
+    func dissolve(over destination: CIImage) throws -> CIImage {
+        return try self.composite(over: destination, filterName: "CIOverlayBlendMode")
     }
 
     /// Simple normalized dissolve (opacity) blend.
@@ -306,7 +357,7 @@ extension CIImage {
 
         // MARK: ––– SETUP DEBUG DUMP FOLDER
         // one random run‑ID, so all files for this invocation share the same suffix
-        let runID = Int.random(in: 1_000_000...9_999_999)
+        let runID = Int.random(in: 1000...10000)
         // e.g. /var/.../T/engrave_debug_<runID>
         let debugDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("engrave_debug_\(runID)")
@@ -346,7 +397,7 @@ extension CIImage {
         dump(fill, stepName: "1_fillOpacity")
 
         // 2) top bezel
-        let topInv = mask.replacingTransparencyWithWhite().unsafelyUnwrapped
+        let topInv = mask.invertedAlphaWhiteBackground().unsafelyUnwrapped
         dump(topInv, stepName: "2_topInvert")
 
         let topCol = try topInv.tint(color: inputs.topBezel.color)
@@ -365,7 +416,7 @@ extension CIImage {
         dump(topFinal, stepName: "2_topOpacity")
 
         // 3) bottom bezel
-        let botCol = try mask.tint(color: inputs.bottomBezel.color)
+        let botCol = try mask.fillColorize(color: inputs.bottomBezel.color)
         dump(botCol, stepName: "3_bottomColorize")
 
         let botBlur = botCol.blurDown(blurDown: inputs.bottomBezel.blur)
@@ -381,21 +432,18 @@ extension CIImage {
         dump(botFinal, stepName: "3_bottomOpacity")
 
         // 4) composite: base behind bottom, then fill, then top
-        let step1 = try template.composite(
-            over: botFinal,
-            filterName: "CISourceOverCompositing"
+        let step1 = try botFinal.dissolve(
+            over: fill,
         )
         dump(step1, stepName: "4_composite_bot")
 
-        let step2 = try step1.composite(
-            over: fill,
-            filterName: "CISourceOverCompositing"
+        let step2 = try step1.dissolve(
+            over: topFinal,
         )
         dump(step2, stepName: "4_composite_fill")
 
-        let step3 = try step2.composite(
-            over: topFinal,
-            filterName: "CISourceOverCompositing"
+        let step3 = try step2.dissolve(
+            over: template,
         )
         dump(step3, stepName: "4_composite_top")
 

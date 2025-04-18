@@ -70,7 +70,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				),
 				bottomBezel: EngravingInputs.Bezel(
 					color: CIColor(red: 174 / 255, green: 225 / 255, blue: 253 / 255),
-					blur: .init(spreadPx: 1, pageY: 0),
+					blur: .init(spreadPx: 2, pageY: 2),
 					maskOp: "dst-out",
 					opacity: 0.5
 				)
