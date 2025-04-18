@@ -63,18 +63,112 @@ extension CIImage {
         return self.cropped(to: box)
     }
 
-    /// Applies a tinted monochrome color.
-    public func fillColorize(color: CIColor) throws -> CIImage {
-        guard let f = CIFilter(name: "CIColorMonochrome") else {
-            throw IconicError.ciFailure("CIColorMonochrome missing")
+    /// Flattens image layers
+    func flatten() -> CIImage {
+        // In CoreImage, flattening is handled through compositing
+        // This is a simplified version assuming we're working with an existing composite
+        return self
+    }
+
+    /// Sets page offset for the image
+    func page(offset: Offset) -> CIImage {
+        return self.transformed(
+            by: CGAffineTransform(
+                translationX: CGFloat(offset.x),
+                y: CGFloat(offset.y)))
+    }
+
+    /// Applies motion blur in the downward direction
+    func motionBlurDown(spreadPx: UInt32) -> CIImage {
+        guard let filter = CIFilter(name: "CIMotionBlur") else {
+            return self
         }
-        f.setValue(self, forKey: kCIInputImageKey)
-        f.setValue(color, forKey: kCIInputColorKey)
-        f.setValue(1.0, forKey: kCIInputIntensityKey)
+
+        filter.setValue(self, forKey: kCIInputImageKey)
+        filter.setValue(Float(spreadPx), forKey: kCIInputRadiusKey)
+        // -90 degrees for downward motion in CoreImage coordinates
+        filter.setValue(-90 * CGFloat.pi / 180, forKey: kCIInputAngleKey)
+
+        return filter.outputImage ?? self
+    }
+
+    /// Sets the background to transparent
+    func backgroundNone() -> CIImage {
+        // Preserve alpha channel
+        return self.applyingFilter("CIMaskToAlpha")
+    }
+
+    /// Applies a blur down effect combining all the above operations
+    func blurDown(blurDown: EngravingInputs.BlurDown) -> CIImage {
+        return
+            self
+            .motionBlurDown(spreadPx: blurDown.spreadPx)
+            .page(offset: Offset(x: 0, y: blurDown.pageY))
+    }
+
+    public func tint(color: CIColor) throws -> CIImage {
+        // Create a solid color image with the same dimensions
+        let colorImage = CIImage(color: color).cropped(to: extent)
+
+        // Use multiply blend mode for tinting
+        guard let f = CIFilter(name: "CIMultiplyCompositing") else {
+            throw IconicError.ciFailure("CIMultiplyCompositing missing")
+        }
+        f.setValue(colorImage, forKey: kCIInputImageKey)
+        f.setValue(self, forKey: kCIInputBackgroundImageKey)
         guard let out = f.outputImage else {
             throw IconicError.ciFailure("Colorize failed")
         }
-        return out.cropped(to: extent)
+        return out
+    }
+
+    func replacingTransparencyWithWhite() -> CIImage? {
+        // 1. Create a solid white background image of the same size
+        //    as the original image.
+        let whiteBackground = CIImage(color: CIColor.white)
+            .cropped(to: self.extent)
+
+        // 2. Use the "Source Over" compositing filter.
+        //    This places the original image (`self`) over the white background.
+        //    Transparent areas in the original image will let the white
+        //    background show through.
+        guard let compositeFilter = CIFilter(name: "CISourceOverCompositing") else {
+            print("Error: Could not create CISourceOverCompositing filter.")
+            return nil
+        }
+
+        compositeFilter.setValue(self, forKey: kCIInputImageKey)
+        compositeFilter.setValue(whiteBackground, forKey: kCIInputBackgroundImageKey)
+
+        // 3. Return the resulting composited image.
+        return compositeFilter.outputImage
+    }
+
+    /// Fills the image with the provided color
+    public func fillColorize(color: CIColor) throws -> CIImage {
+        // 1) Make a solid‐color image the same size as self
+        guard let constantColor = CIFilter(name: "CIConstantColorGenerator") else {
+            throw IconicError.ciFailure("CIConstantColorGenerator missing")
+        }
+        constantColor.setValue(color, forKey: kCIInputColorKey)
+        // the generator is infinite in extent, so crop it to ours
+        guard let colorImage = constantColor.outputImage?.cropped(to: extent) else {
+            throw IconicError.ciFailure("failed to generate color image")
+        }
+
+        // 2) Composite it “source‑in” your original alpha
+        guard let sourceIn = CIFilter(name: "CISourceInCompositing") else {
+            throw IconicError.ciFailure("CISourceInCompositing missing")
+        }
+        sourceIn.setValue(colorImage, forKey: kCIInputImageKey)
+        sourceIn.setValue(self, forKey: kCIInputBackgroundImageKey)
+
+        guard let output = sourceIn.outputImage else {
+            throw IconicError.ciFailure("Colorize compositing failed")
+        }
+
+        // 3) Crop back to the original image’s extent
+        return output.cropped(to: extent)
     }
 
     /// Simple normalized dissolve (opacity) blend.
@@ -209,39 +303,101 @@ extension CIImage {
         template: CIImage,
         inputs: EngravingInputs
     ) throws -> CIImage {
+
+        // MARK: ––– SETUP DEBUG DUMP FOLDER
+        // one random run‑ID, so all files for this invocation share the same suffix
+        let runID = Int.random(in: 1_000_000...9_999_999)
+        // e.g. /var/.../T/engrave_debug_<runID>
+        let debugDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("engrave_debug_\(runID)")
+
+        try? FileManager.default.createDirectory(
+            at: debugDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        // helper that renders & writes a CIImage to disk as PNG
+        func dump(_ image: CIImage, stepName: String) {
+            let context = CIContext()
+            let fileURL =
+                debugDir
+                .appendingPathComponent("step_\(stepName)_\(runID).png")
+            let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+
+            do {
+                print("writing to \(fileURL)")
+                try context.writePNGRepresentation(
+                    of: image,
+                    to: fileURL,
+                    format: .RGBA8,
+                    colorSpace: cs
+                )
+            } catch {
+                print("⚠️ failed to dump \(stepName): \(error)")
+            }
+        }
+
         // 1) fill
         let fillMono = try mask.fillColorize(color: inputs.fillColor)
+        dump(fillMono, stepName: "1_fillColorize")
+
         let fill = try fillMono.applyingOpacity(0.5)
+        dump(fill, stepName: "1_fillOpacity")
 
         // 2) top bezel
-        let topInv = try mask.invertedMask()
-        let topCol = try topInv.fillColorize(color: inputs.topBezel.color)
-        let topBlur = try topCol.blurred(radius: inputs.topBezel.blurRadius)
+        let topInv = mask.replacingTransparencyWithWhite().unsafelyUnwrapped
+        dump(topInv, stepName: "2_topInvert")
+
+        let topCol = try topInv.tint(color: inputs.topBezel.color)
+        dump(topCol, stepName: "2_topColorize")
+
+        let topBlur = topCol.blurDown(blurDown: inputs.topBezel.blur)
+        dump(topBlur, stepName: "2_topBlur")
+
         let topMaskd = try topBlur.masked(
             by: mask,
             operation: inputs.topBezel.maskOp
         )
+        dump(topMaskd, stepName: "2_topMasked")
+
         let topFinal = try topMaskd.applyingOpacity(inputs.topBezel.opacity)
+        dump(topFinal, stepName: "2_topOpacity")
 
         // 3) bottom bezel
-        let botCol = try mask.fillColorize(color: inputs.bottomBezel.color)
-        let botBlur = try botCol.blurred(radius: inputs.bottomBezel.blurRadius)
+        let botCol = try mask.tint(color: inputs.bottomBezel.color)
+        dump(botCol, stepName: "3_bottomColorize")
+
+        let botBlur = botCol.blurDown(blurDown: inputs.bottomBezel.blur)
+        dump(botBlur, stepName: "3_bottomBlur")
+
         let botMaskd = try botBlur.masked(
             by: mask,
             operation: inputs.bottomBezel.maskOp
         )
+        dump(botMaskd, stepName: "3_bottomMasked")
+
         let botFinal = try botMaskd.applyingOpacity(inputs.bottomBezel.opacity)
+        dump(botFinal, stepName: "3_bottomOpacity")
 
         // 4) composite: base behind bottom, then fill, then top
         let step1 = try template.composite(
             over: botFinal,
-            filterName: "CISourceOverCompositing")
+            filterName: "CISourceOverCompositing"
+        )
+        dump(step1, stepName: "4_composite_bot")
+
         let step2 = try step1.composite(
             over: fill,
-            filterName: "CISourceOverCompositing")
+            filterName: "CISourceOverCompositing"
+        )
+        dump(step2, stepName: "4_composite_fill")
+
         let step3 = try step2.composite(
             over: topFinal,
-            filterName: "CISourceOverCompositing")
+            filterName: "CISourceOverCompositing"
+        )
+        dump(step3, stepName: "4_composite_top")
 
         return step3
     }
