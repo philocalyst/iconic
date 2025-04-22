@@ -12,12 +12,10 @@ The `iconic` tool provides three main functions:
 
 It utilizes Metal for fast, GPU-accelerated trimming of transparent pixels around icons and Core Image for various effects and compositing operations.
 
-## Screenshot
-
-*(Placeholder: You can add a screenshot demonstrating the tool's usage or the resulting masked icon here)*
+![Shows an example mask with the imprint "BOOYAH"](Assets/example.jpg "Example")
 
 ```shell
-# Example Usage: Masking a folder icon
+# Example Usage: Masking a folder icon and revealing it in finder.
 iconic mask --icns custom-icon.icns --reveal MyProjectIcon.png ~/Projects/MyProject
 
 # Result: custom-icon.icns created and applied to ~/Projects/MyProject
