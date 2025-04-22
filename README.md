@@ -161,7 +161,9 @@ For details on recent changes, please see the [CHANGELOG.md](CHANGELOG.md) file.
 
 ## Acknowledgements
 
-This project relies heavily on the powerful graphics and application frameworks provided by Apple for macOS. The Metal-based transparency trimming kernel (`findBoundingBox`) provides efficient image analysis.
+All of the algorithims in this project are based off of references over at folderify. Thanks [https://github.com/lgarron/folderify](dude)! 
+
+This project relies heavily on the powerful graphics and application frameworks provided by Apple for macOS. Thanks corporate overlords!
 
 ## License
 
