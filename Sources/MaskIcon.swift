@@ -56,7 +56,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 			// a) crop transparent of base
 			let crop = try baseCI.trimmingTransparentMargin()
 			// b) resize mask to fit base
-			let resizedMask = try trimmedMask.scaled(toFit: crop.extent.size)
+			let resizedMask = try trimmedMask.scaled(toFit: crop.extent.size, ratio: 2.65)
 			// c) center it
 			let centered = resizedMask.centering(over: crop)
 			// d) composite: here we engrave with bezel etc.
@@ -72,7 +72,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 					color: CIColor(red: 174 / 255, green: 225 / 255, blue: 253 / 255),
 					blur: .init(spreadPx: 2, pageY: 2),
 					maskOp: "dst-out",
-					opacity: 0.5
+					opacity: 0.75
 				)
 			)
 			let engraved = try crop.engrave(
@@ -80,12 +80,7 @@ struct MaskIcon: @preconcurrency ParsableCommand {
 				template: crop,
 				inputs: inputs
 			)
-			// e) overlay engraved on base
-			let final = try engraved.composite(
-				over: baseCI,
-				filterName: "CIOverlayBlendMode"
-			)
-			finalImages.append(final)
+			finalImages.append(engraved)
 		}
 
 		// 5) Write outputs
