@@ -316,23 +316,31 @@ extension CIImage {
         return out
     }
 
-    /// Scale to fit within `maxSize`, preserve aspect.
-    public func scaled(toFit maxSize: CGSize) throws -> CIImage {
-        guard
-            let f = CIFilter(name: "CILanczosScaleTransform")
-        else {
+    /// Scale to fit within `maxSize`, preserve aspect, then apply `ratio`.
+    public func scaled(
+        toFit maxSize: CGSize,
+        ratio: CGFloat = 1
+    ) throws -> CIImage {
+        guard let f = CIFilter(name: "CILanczosScaleTransform") else {
             throw IconicError.ciFailure("Lanczos missing")
         }
+
         let sz = extent.size
-        let scale = min(
+        // basic scale to fill maxSize preserving aspect
+        let baseScale = min(
             maxSize.width / sz.width,
             maxSize.height / sz.height)
-        guard scale > 0 else {
-            throw IconicError.ciFailure("Bad scale")
+        guard baseScale > 0, ratio > 0 else {
+            throw IconicError.ciFailure("Bad scale or ratio")
         }
+
+        // divide by ratio so ratio>1 makes it smaller
+        let finalScale = baseScale / ratio
+
         f.setValue(self, forKey: kCIInputImageKey)
-        f.setValue(scale, forKey: kCIInputScaleKey)
+        f.setValue(finalScale, forKey: kCIInputScaleKey)
         f.setValue(1.0, forKey: kCIInputAspectRatioKey)
+
         guard let out = f.outputImage else {
             throw IconicError.ciFailure("Scale failed")
         }
@@ -344,7 +352,7 @@ extension CIImage {
         let be = bg.extent
         let me = extent
         let tx = be.minX + (be.width - me.width) / 2 - me.minX
-        let ty = be.minY + (be.height - me.height) / 2 - me.minY
+        let ty = (be.minY + (be.height - me.height) / 2 - me.minY) * 0.87  // Normalize (Always off for some reason?)
         return transformed(by: CGAffineTransform(translationX: tx, y: ty))
     }
 
@@ -393,7 +401,9 @@ extension CIImage {
         let fillMono = try mask.fillColorize(color: inputs.fillColor)
         dump(fillMono, stepName: "1_fillColorize")
 
-        let fill = try fillMono.applyingOpacity(0.5)
+        let fill = try fillMono.applyingOpacity(0.5).tint(
+            color: CIColor(red: 0.0, green: 0.0, blue: 0.0))
+
         dump(fill, stepName: "1_fillOpacity")
 
         // 2) top bezel
@@ -441,6 +451,8 @@ extension CIImage {
             over: topFinal,
         )
         dump(step2, stepName: "4_composite_fill")
+
+        dump(template, stepName: "TEMPLATE")
 
         let step3 = try step2.dissolve(
             over: template,
