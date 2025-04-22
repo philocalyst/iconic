@@ -218,6 +218,14 @@ extension CIImage {
         return output.cropped(to: extent)
     }
 
+    func darken() throws -> CIImage {
+        // Make a solid black CIImage the same size as self
+        let blackBG = CIImage(color: .black).cropped(to: extent)
+
+        // Apply the darken blend
+        return try composite(over: blackBG, filterName: "CIDarkenBlendMode")
+    }
+
     func dissolve(over destination: CIImage) throws -> CIImage {
         return try self.composite(over: destination, filterName: "CIOverlayBlendMode")
     }
