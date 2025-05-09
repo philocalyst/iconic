@@ -272,20 +272,42 @@ extension CIImage {
     return out
   }
 
-        }
+  /// Blend with mask using a variety of operations.
+  public func masked(
+    by mask: CIImage,
+    operation: String
+  ) throws -> CIImage {
+    let op = operation.lowercased()
+    let name: String
+    switch op {
+    case "dst-in", "sourcein":
+      name = "CISourceInCompositing"
+    case "dst-out", "sourceout":
+      name = "CISourceOutCompositing"
+    case "multiply", "blend":
+      name = "CIBlendWithMask"
+    default:
+      throw IconicError.ciImageRenderingFailed("Unknown mask op \(operation)")
+    }
 
-        // 4) Blend white over clear, using the inverted-mask as the α mask
-        guard
-            let blend = CIFilter(name: "CIBlendWithAlphaMask")
-        else {
-            print("Failed to create CIBlendWithAlphaMask")
-            return nil
-        }
-        blend.setValue(white, forKey: kCIInputImageKey)
-        blend.setValue(clear, forKey: kCIInputBackgroundImageKey)
-        blend.setValue(invertedMask, forKey: kCIInputMaskImageKey)
+    guard let f = CIFilter(name: name) else {
+      throw IconicError.ciImageRenderingFailed("Filter \(name) missing")
+    }
+    f.setValue(self, forKey: kCIInputImageKey)
+    if name == "CIBlendWithMask" {
+      f.setValue(
+        CIImage.empty().cropped(to: extent),
+        forKey: kCIInputBackgroundImageKey)
+      f.setValue(mask, forKey: kCIInputMaskImageKey)
+    } else {
+      f.setValue(mask, forKey: kCIInputBackgroundImageKey)
+    }
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("\(name) failed")
+    }
+    return out
+  }
 
-        return blend.outputImage
     }
 
     /// Fills the image with the provided color
