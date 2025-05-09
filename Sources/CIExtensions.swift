@@ -175,36 +175,41 @@ extension CIImage {
     return blend.outputImage
   }
 
+  /// Fills the image with the provided color
+  public func fillColorize(color: CIColor) throws -> CIImage {
+    // 1) Make a solid‐color image the same size as self
+    guard let constantColor = CIFilter(name: "CIConstantColorGenerator") else {
+      throw IconicError.ciImageRenderingFailed("CIConstantColorGenerator missing")
+    }
+    constantColor.setValue(color, forKey: kCIInputColorKey)
+    // the generator is infinite in extent, so crop it to ours
+    guard let colorImage = constantColor.outputImage?.cropped(to: extent) else {
+      throw IconicError.ciImageRenderingFailed("failed to generate color image")
     }
 
-    /// Sets the background to transparent
-    func backgroundNone() -> CIImage {
-        // Preserve alpha channel
-        return self.applyingFilter("CIMaskToAlpha")
+    // 2) Composite it “source‑in” your original alpha
+    guard let sourceIn = CIFilter(name: "CISourceInCompositing") else {
+      throw IconicError.ciImageRenderingFailed("CISourceInCompositing missing")
+    }
+    sourceIn.setValue(colorImage, forKey: kCIInputImageKey)
+    sourceIn.setValue(self, forKey: kCIInputBackgroundImageKey)
+
+    guard let output = sourceIn.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Colorize compositing failed")
     }
 
-    /// Applies a blur down effect combining all the above operations
-    func blurDown(blurDown: EngravingInputs.BlurDown) -> CIImage {
-        return
-            self
-            .motionBlurDown(spreadPx: blurDown.spreadPx)
-            .page(offset: Offset(x: 0, y: -blurDown.pageY))
-    }
+    // 3) Crop back to the original image’s extent
+    return output.cropped(to: extent)
+  }
 
-    public func tint(color: CIColor) throws -> CIImage {
-        // Create a solid color image with the same dimensions
-        let colorImage = CIImage(color: color).cropped(to: extent)
+  func darken() throws -> CIImage {
+    // Make a solid black CIImage the same size as self
+    let blackBG = CIImage(color: .black).cropped(to: extent)
 
-        // Use multiply blend mode for tinting
-        guard let f = CIFilter(name: "CIMultiplyCompositing") else {
-            throw IconicError.ciFailure("CIMultiplyCompositing missing")
-        }
-        f.setValue(colorImage, forKey: kCIInputImageKey)
-        f.setValue(self, forKey: kCIInputBackgroundImageKey)
-        guard let out = f.outputImage else {
-            throw IconicError.ciFailure("Colorize failed")
-        }
-        return out
+    // Apply the darken blend
+    return try composite(over: blackBG, filterName: "CIDarkenBlendMode")
+  }
+
     }
 
     /// Returns a CIImage in which the original alpha is inverted:
