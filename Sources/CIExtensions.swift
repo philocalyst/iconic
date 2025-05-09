@@ -54,6 +54,14 @@ public struct EngravingInputs {
 }
 
 extension CIImage {
+  /// Sets page offset for the image
+  func page(offset: Offset) -> CIImage {
+    return self.transformed(
+      by: CGAffineTransform(
+        translationX: CGFloat(offset.x),
+        y: CGFloat(offset.y)))
+  }
+
     }
 
     /// Flattens image layers
