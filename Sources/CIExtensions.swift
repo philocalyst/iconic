@@ -339,9 +339,16 @@ extension CIImage {
     return out
   }
 
+  /// Center this image over `bg` by translation.
+  public func centering(over bg: CIImage) -> CIImage {
+    let be = bg.extent
+    let me = extent
+    let tx = be.minX + (be.width - me.width) / 2 - me.minX
+    let ty = (be.minY + (be.height - me.height) / 2 - me.minY) * 0.87  // Normalize (Always off for some reason?)
+    return transformed(by: CGAffineTransform(translationX: tx, y: ty))
+  }
 
-        // Apply the darken blend
-        return try composite(over: blackBG, filterName: "CIDarkenBlendMode")
+  // helper that renders & writes a CIImage to disk as PNG
     }
 
     func dissolve(over destination: CIImage) throws -> CIImage {
