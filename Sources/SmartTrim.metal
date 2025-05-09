@@ -37,7 +37,7 @@ kernel void findBoundingBox(
 
 	// We need to declare an alpha threshold to pick up on pixels that might not have a true transparent value (0 Alpha), but most human eyes would register as invisible anyways.
 	// This threshold is 1.0/255.0 (approx 0.0039), the smallest possible non-zero alpha. (Assuming 8-bit RGBA)
-    constexpr float alphaThreshold = 1.0f / 255.0f;
+    constexpr float alphaThreshold = .303f;
 
 	// We create the bounding box through perhaps counter-intuitively marking the non-alpha values.
 	// Since the GPU will work through the texture from different positions at different rates, it is generally slower to force a shrinking frame, as might be common in CPU implementations.

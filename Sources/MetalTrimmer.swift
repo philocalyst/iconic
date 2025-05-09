@@ -4,137 +4,245 @@ import Metal
 
 /// A singleton to detect the minimal non‐transparent bounding
 /// rectangle of a CIImage via a Metal kernel.
+
 @MainActor
-final class MetalTrimmer: @unchecked Sendable {
-	static let shared = try! MetalTrimmer()
+@preconcurrency final class MetalTrimmer {
 
-	let device: MTLDevice
-	let queue: MTLCommandQueue
-	let pipelineState: MTLComputePipelineState
-	let ciContext: CIContext
+  let log = AppLog.shared
 
-	private init() throws {
-		guard let dev = MTLCreateSystemDefaultDevice() else {
-			throw IconicError.metalFailure("No Metal device available")
-		}
-		device = dev
+  // Shared instance for the program
+  static let shared = try! MetalTrimmingContext()
 
-		guard let q = device.makeCommandQueue() else {
-			throw IconicError.metalFailure("Failed creating command queue")
-		}
-		queue = q
-		ciContext = CIContext(mtlDevice: device)
+  let device: MTLDevice
+  let commandQueue: MTLCommandQueue
+  let pipelineState: MTLComputePipelineState
+  let ciContext: CIContext  // Needed for rendering the CIImage to texture
 
-		// Load our custom kernel
-		let library = try MetalKernelLoader.loadLibrary(device: device)
-		guard let fn = library.makeFunction(name: "findBoundingBox") else {
-			throw IconicError.metalFailure("Kernel `findBoundingBox` not found")
-		}
-		pipelineState = try device.makeComputePipelineState(function: fn)
-	}
+  // This constant is for matching the struct the metal engine uses to calculate the bounding box
+  enum BBoxIndex: Int {
+    case minX = 0
+    case minY = 1
+    case maxX = 2
+    case maxY = 3
+    static let count = 4
+  }
 
-	/// Runs the `findBoundingBox` kernel on `image` and returns
-	/// its smallest non‐transparent rect, or `.null` if none.
-	func boundingBox(of image: CIImage) throws -> CGRect {
-		let extent = image.extent
-		guard
-			extent.width > 0,
-			extent.height > 0,
-			!extent.isInfinite
-		else {
-			return .null
-		}
+  private init() throws {
+    // Retrieve the metal device, using the default processor
+    guard let defaultDevice = MTLCreateSystemDefaultDevice() else {
+      throw IconicError.metalInitializationFailed("Could not create default Metal device.")
+    }
 
-		// 1) Create a Metal texture to render into
-		let w = Int(extent.width.rounded(.up))
-		let h = Int(extent.height.rounded(.up))
-		let desc = MTLTextureDescriptor.texture2DDescriptor(
-			pixelFormat: .bgra8Unorm,
-			width: w,
-			height: h,
-			mipmapped: false
-		)
-		desc.usage = [.shaderRead, .renderTarget]
-		desc.storageMode = .private
+    self.device = defaultDevice
+    log.info("MetalTrimmingContext: Using Metal device: \(device.name)")
 
-		guard let texture = device.makeTexture(descriptor: desc) else {
-			throw IconicError.metalFailure("Failed creating texture")
-		}
+    guard let queue = device.makeCommandQueue() else {
+      throw IconicError.metalInitializationFailed("Could not create command queue.")
+    }
+    self.commandQueue = queue
 
-		// 2) Render the CIImage into that texture
-		let cb = queue.makeCommandBuffer()!
-		let shifted = image.transformed(
-			by: CGAffineTransform(
-				translationX: -extent.origin.x,
-				y: -extent.origin.y)
-		)
-		let colorspace = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
-		ciContext.render(
-			shifted,
-			to: texture,
-			commandBuffer: cb,
-			bounds: CGRect(x: 0, y: 0, width: w, height: h),
-			colorSpace: colorspace
-		)
-		cb.commit()
-		cb.waitUntilCompleted()
-		if let e = cb.error {
-			throw IconicError.ciFailure("CI render failed: \(e)")
-		}
+    // CIConext backed by metal device
+    self.ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+    log.info("MetalTrimmingContext: CIContext created.")
 
-		// 3) Create a small shared buffer to collect min/max coords
-		let bufSize = 4 * MemoryLayout<UInt32>.stride
-		let outBuf = device.makeBuffer(
-			length: bufSize,
-			options: .storageModeShared
-		)!
-		let ptr = outBuf.contents().bindMemory(
-			to: UInt32.self,
-			capacity: 4
-		)
-		// initialize: min = maxUInt32, max = 0
-		ptr[0] = UInt32.max
-		ptr[1] = UInt32.max
-		ptr[2] = 0
-		ptr[3] = 0
+    // Loading the metal library and our custom kernel function
+    let kernelFunction: MTLFunction
+    do {
+      // Try loading the default library from the default location (main)
+      let library = try device.makeDefaultLibrary(bundle: .main)
+      guard let function = library.makeFunction(name: "findBoundingBox") else {
+        throw IconicError.metalInitializationFailed(
+          "Kernel 'findBoundingBox' not found in default library.")
+      }
+      kernelFunction = function
+      print("Loaded kernel function from default library.")
+    } catch {
+      // If loading the precompiled from that location doesn't work, try to compile ourselves.
+      print("Default library not found or kernel missing. Trying to compile from source...")
+      let metalFileURL = URL(
+        fileURLWithPath: "/Users/philocalyst/Projects/iconic/Sources/SmartTrim.metal"
+      )  // Stand-in pathing
 
-		// 4) Dispatch the compute kernel
-		let ccb = queue.makeCommandBuffer()!
-		let encoder = ccb.makeComputeCommandEncoder()!
-		encoder.setComputePipelineState(pipelineState)
-		encoder.setTexture(texture, index: 0)
-		encoder.setBuffer(outBuf, offset: 0, index: 0)
+      guard FileManager.default.fileExists(atPath: metalFileURL.path) else {
+        throw IconicError.metalInitializationFailed(
+          "SmartTrim.metal not found at \(metalFileURL.path). Cannot compile from source."
+        )
+      }
 
-		let tw = pipelineState.threadExecutionWidth
-		let th = pipelineState.maxTotalThreadsPerThreadgroup / tw
-		let tg = MTLSize(width: tw, height: th, depth: 1)
-		let grid = MTLSize(
-			width: (w + tw - 1) / tw,
-			height: (h + th - 1) / th,
-			depth: 1
-		)
-		encoder.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
-		encoder.endEncoding()
-		ccb.commit()
-		ccb.waitUntilCompleted()
-		if let e = ccb.error {
-			throw IconicError.metalFailure("Compute failed: \(e)")
-		}
+      // Compilation
+      do {
+        let source = try String(contentsOf: metalFileURL, encoding: .utf8)
+        let library = try device.makeLibrary(source: source, options: nil)
+        guard let function = library.makeFunction(name: "findBoundingBox") else {
+          throw IconicError.metalInitializationFailed(
+            "Kernel 'findBoundingBox' not found after compiling source.")
+        }
+        kernelFunction = function
+        print("Successfully compiled kernel function from source.")
+      } catch let compileError {
+        throw IconicError.metalInitializationFailed(
+          "Could not compile Metal source: \(compileError.localizedDescription)")
+      }
+    }
 
-		// 5) Read back and compute CGRect
-		let minX = Int(ptr[0])
-		let minY = Int(ptr[1])
-		let maxX = Int(ptr[2])
-		let maxY = Int(ptr[3])
-		guard minX <= maxX, minY <= maxY else {
-			return .null
-		}
+    // Create the compute pipeline state using the kernel function.
+    do {
+      self.pipelineState = try device.makeComputePipelineState(function: kernelFunction)
+    } catch {
+      throw IconicError.metalInitializationFailed(
+        "Could not create compute pipeline state: \(error.localizedDescription)")
+    }
+  }
+}
 
-		// convert back into image coords
-		let x = CGFloat(minX) + extent.origin.x
-		let y = CGFloat(minY) + extent.origin.y
-		let wF = CGFloat(maxX - minX + 1)
-		let hF = CGFloat(maxY - minY + 1)
-		return CGRect(x: x, y: y, width: wF, height: hF)
-	}
+@preconcurrency final class MetalTrimmingContext {
+
+  let log = AppLog.shared
+
+  // Shared instance for the program
+
+  static let shared = try! MetalTrimmingContext()
+
+  let device: MTLDevice
+
+  let commandQueue: MTLCommandQueue
+
+  let pipelineState: MTLComputePipelineState
+
+  let ciContext: CIContext  // Needed for rendering the CIImage to texture
+
+  // This constant is for matching the struct the metal engine uses to calculate the bounding box
+
+  enum BBoxIndex: Int {
+
+    case minX = 0
+
+    case minY = 1
+
+    case maxX = 2
+
+    case maxY = 3
+
+    static let count = 4
+
+  }
+
+  public init() throws {
+
+    // Retrieve the metal device, using the default processor
+
+    guard let defaultDevice = MTLCreateSystemDefaultDevice() else {
+
+      throw IconicError.metalInitializationFailed("Could not create default Metal device.")
+
+    }
+
+    self.device = defaultDevice
+
+    log.info("MetalTrimmingContext: Using Metal device: \(device.name)")
+
+    guard let queue = device.makeCommandQueue() else {
+
+      throw IconicError.metalInitializationFailed("Could not create command queue.")
+
+    }
+
+    self.commandQueue = queue
+
+    // CIConext backed by metal device
+
+    self.ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+
+    log.info("MetalTrimmingContext: CIContext created.")
+
+    // Loading the metal library and our custom kernel function
+
+    let kernelFunction: MTLFunction
+
+    do {
+
+      // Try loading the default library from the default location (main)
+
+      let library = try device.makeDefaultLibrary(bundle: .main)
+
+      guard let function = library.makeFunction(name: "findBoundingBox") else {
+
+        throw IconicError.metalInitializationFailed(
+
+          "Kernel 'findBoundingBox' not found in default library.")
+
+      }
+
+      kernelFunction = function
+
+      print("Loaded kernel function from default library.")
+
+    } catch {
+
+      // If loading the precompiled from that location doesn't work, try to compile ourselves.
+
+      print("Default library not found or kernel missing. Trying to compile from source...")
+
+      let metalFileURL = URL(
+
+        fileURLWithPath: "/Users/philocalyst/Projects/iconic/Sources/SmartTrim.metal"
+
+      )  // Stand-in pathing
+
+      guard FileManager.default.fileExists(atPath: metalFileURL.path) else {
+
+        throw IconicError.metalInitializationFailed(
+
+          "SmartTrim.metal not found at \(metalFileURL.path). Cannot compile from source."
+
+        )
+
+      }
+
+      // Compilation
+
+      do {
+
+        let source = try String(contentsOf: metalFileURL, encoding: .utf8)
+
+        let library = try device.makeLibrary(source: source, options: nil)
+
+        guard let function = library.makeFunction(name: "findBoundingBox") else {
+
+          throw IconicError.metalInitializationFailed(
+
+            "Kernel 'findBoundingBox' not found after compiling source.")
+
+        }
+
+        kernelFunction = function
+
+        print("Successfully compiled kernel function from source.")
+
+      } catch let compileError {
+
+        throw IconicError.metalInitializationFailed(
+
+          "Could not compile Metal source: \(compileError.localizedDescription)")
+
+      }
+
+    }
+
+    // Create the compute pipeline state using the kernel function.
+
+    do {
+
+      self.pipelineState = try device.makeComputePipelineState(function: kernelFunction)
+
+    } catch {
+
+      throw IconicError.metalInitializationFailed(
+
+        "Could not create compute pipeline state: \(error.localizedDescription)")
+
+    }
+
+  }
+
 }
