@@ -110,6 +110,14 @@ Applies a PNG image as a mask onto the standard macOS folder icon template (Big 
 
 ## Installation
 
+### From Homebrew
+```shell
+# Using my tap for now
+brew install philocalyst/tap/iconic
+```
+
+### From Source
+
 1.  **Prerequisites:**
     * macOS 12.0 or later.
     * Xcode Command Line Tools (or full Xcode) installed (`xcode-select --install`).
