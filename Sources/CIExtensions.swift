@@ -54,13 +54,6 @@ public struct EngravingInputs {
 }
 
 extension CIImage {
-    /// Trim transparent margin via Metal‐accelerated bounding box detection.
-    /// - Returns: A cropped CIImage or the original if fully transparent.
-    @MainActor
-    public func trimmingTransparentMargin() throws -> CIImage {
-        let box = try MetalTrimmer.shared.boundingBox(of: self)
-        guard !box.isNull else { return self }
-        return self.cropped(to: box)
     }
 
     /// Flattens image layers
