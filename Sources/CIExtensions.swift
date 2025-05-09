@@ -260,25 +260,18 @@ extension CIImage {
   }
 
   /// Simple Gaussian blur.
+  public func blurred(radius r: CGFloat) throws -> CIImage {
+    guard let f = CIFilter(name: "CIGaussianBlur") else {
+      throw IconicError.ciImageRenderingFailed("CIGaussianBlur missing")
+    }
+    f.setValue(self, forKey: kCIInputImageKey)
+    f.setValue(max(0, r), forKey: kCIInputRadiusKey)
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Blur failed")
+    }
+    return out
+  }
 
-        // 3) Invert that alpha mask: α → 1 - α
-        guard
-            let invertedMask = CIFilter(
-                name: "CIColorMatrix",
-                parameters: [
-                    kCIInputImageKey: extractAlpha,
-                    // no color channels
-                    "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    // invert alpha
-                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: -1),
-                    // bias of +1 => 1 - α
-                    "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                ])?.outputImage
-        else {
-            print("Failed to invert alpha")
-            return nil
         }
 
         // 4) Blend white over clear, using the inverted-mask as the α mask
