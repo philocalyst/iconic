@@ -108,20 +108,73 @@ extension CIImage {
 
   /// Returns a CIImage in which the original alpha is inverted:
   /// transparent → white, opaque → transparent.
+  func invertedAlphaWhiteBackground() -> CIImage? {
+    let extent = self.extent
+
+    // 1) Create white & clear images
+    let white = CIImage(color: .white)
+      .cropped(to: extent)
+    let clear = CIImage(
+      color: CIColor(
+        red: 0,
+        green: 0,
+        blue: 0,
+        alpha: 0)
+    )
+    .cropped(to: extent)
+
+    // 2) Extract original alpha into a mask
+    guard
+      let extractAlpha = CIFilter(
+        name: "CIColorMatrix",
+        parameters: [
+          kCIInputImageKey: self,
+          "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          // keep only the α channel
+          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+          "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+        ])?.outputImage
+    else {
+      print("Failed to extract alpha")
+      return nil
     }
 
-    /// Applies motion blur in the downward direction
-    func motionBlurDown(spreadPx: UInt32) -> CIImage {
-        guard let filter = CIFilter(name: "CIMotionBlur") else {
-            return self
-        }
+    // 3) Invert that alpha mask: α → 1 - α
+    guard
+      let invertedMask = CIFilter(
+        name: "CIColorMatrix",
+        parameters: [
+          kCIInputImageKey: extractAlpha,
+          // no color channels
+          "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          // invert alpha
+          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: -1),
+          // bias of +1 => 1 - α
+          "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+        ])?.outputImage
+    else {
+      print("Failed to invert alpha")
+      return nil
+    }
 
-        filter.setValue(self, forKey: kCIInputImageKey)
-        filter.setValue(Float(spreadPx), forKey: kCIInputRadiusKey)
-        // -90 degrees for downward motion in CoreImage coordinates
-        filter.setValue(-90 * CGFloat.pi / 180, forKey: kCIInputAngleKey)
+    // 4) Blend white over clear, using the inverted-mask as the α mask
+    guard
+      let blend = CIFilter(name: "CIBlendWithAlphaMask")
+    else {
+      print("Failed to create CIBlendWithAlphaMask")
+      return nil
+    }
+    blend.setValue(white, forKey: kCIInputImageKey)
+    blend.setValue(clear, forKey: kCIInputBackgroundImageKey)
+    blend.setValue(invertedMask, forKey: kCIInputMaskImageKey)
 
-        return filter.outputImage ?? self
+    return blend.outputImage
+  }
+
     }
 
     /// Sets the background to transparent
