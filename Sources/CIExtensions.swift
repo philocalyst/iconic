@@ -210,12 +210,28 @@ extension CIImage {
     return try composite(over: blackBG, filterName: "CIDarkenBlendMode")
   }
 
-    }
+  func dissolve(over destination: CIImage) throws -> CIImage {
+    return try self.composite(over: destination, filterName: "CIOverlayBlendMode")
+  }
 
-    /// Returns a CIImage in which the original alpha is inverted:
-    /// transparent → white, opaque → transparent.
-    func invertedAlphaWhiteBackground() -> CIImage? {
-        let extent = self.extent
+  /// Simple normalized dissolve (opacity) blend.
+  public func applyingOpacity(_ alpha: CGFloat) throws -> CIImage {
+    let a = max(0, min(1, alpha))
+    guard let f = CIFilter(name: "CIColorMatrix") else {
+      throw IconicError.ciImageRenderingFailed("CIColorMatrix missing")
+    }
+    // keep RGB, multiply A by `a`
+    f.setValue(self, forKey: kCIInputImageKey)
+    f.setValue(
+      CIVector(x: 0, y: 0, z: 0, w: a),
+      forKey: "inputAVector")
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Alpha adjust failed")
+    }
+    return out
+  }
+
+  /// General compositing (sourceOver by default).
 
         // 1) Create white & clear images
         let white = CIImage(color: .white)
