@@ -232,36 +232,34 @@ extension CIImage {
   }
 
   /// General compositing (sourceOver by default).
+  public func composite(
+    over bg: CIImage,
+    filterName: String = "CISourceOverCompositing"
+  ) throws -> CIImage {
+    guard let f = CIFilter(name: filterName) else {
+      throw IconicError.ciImageRenderingFailed("Filter \(filterName) missing")
+    }
+    f.setValue(self, forKey: kCIInputImageKey)
+    f.setValue(bg, forKey: kCIInputBackgroundImageKey)
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Composite (\(filterName)) failed")
+    }
+    return out
+  }
 
-        // 1) Create white & clear images
-        let white = CIImage(color: .white)
-            .cropped(to: extent)
-        let clear = CIImage(
-            color: CIColor(
-                red: 0,
-                green: 0,
-                blue: 0,
-                alpha: 0)
-        )
-        .cropped(to: extent)
+  /// Invert alpha: black = opaque, white = transparent.
+  public func invertedMask() throws -> CIImage {
+    guard let f = CIFilter(name: "CIColorInvert") else {
+      throw IconicError.ciImageRenderingFailed("CIColorInvert missing")
+    }
+    f.setValue(self, forKey: kCIInputImageKey)
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Invert failed")
+    }
+    return out.cropped(to: extent)
+  }
 
-        // 2) Extract original alpha into a mask
-        guard
-            let extractAlpha = CIFilter(
-                name: "CIColorMatrix",
-                parameters: [
-                    kCIInputImageKey: self,
-                    "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    // keep only the α channel
-                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                    "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                ])?.outputImage
-        else {
-            print("Failed to extract alpha")
-            return nil
-        }
+  /// Simple Gaussian blur.
 
         // 3) Invert that alpha mask: α → 1 - α
         guard
