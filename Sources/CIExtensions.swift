@@ -62,21 +62,52 @@ extension CIImage {
         y: CGFloat(offset.y)))
   }
 
+  /// Applies motion blur in the downward direction
+  func motionBlurDown(spreadPx: UInt32) -> CIImage {
+    guard let filter = CIFilter(name: "CIMotionBlur") else {
+      return self
     }
 
-    /// Flattens image layers
-    func flatten() -> CIImage {
-        // In CoreImage, flattening is handled through compositing
-        // This is a simplified version assuming we're working with an existing composite
-        return self
-    }
+    filter.setValue(self, forKey: kCIInputImageKey)
+    filter.setValue(Float(spreadPx), forKey: kCIInputRadiusKey)
+    // -90 degrees for downward motion in CoreImage coordinates
+    filter.setValue(-90 * CGFloat.pi / 180, forKey: kCIInputAngleKey)
 
-    /// Sets page offset for the image
-    func page(offset: Offset) -> CIImage {
-        return self.transformed(
-            by: CGAffineTransform(
-                translationX: CGFloat(offset.x),
-                y: CGFloat(offset.y)))
+    return filter.outputImage ?? self
+  }
+
+  /// Sets the background to transparent
+  func backgroundNone() -> CIImage {
+    // Preserve alpha channel
+    return self.applyingFilter("CIMaskToAlpha")
+  }
+
+  /// Applies a blur down effect combining all the above operations
+  func blurDown(blurDown: EngravingInputs.BlurDown) -> CIImage {
+    return
+      self
+      .motionBlurDown(spreadPx: blurDown.spreadPx)
+      .page(offset: Offset(x: 0, y: -blurDown.pageY))
+  }
+
+  public func tint(color: CIColor) throws -> CIImage {
+    // Create a solid color image with the same dimensions
+    let colorImage = CIImage(color: color).cropped(to: extent)
+
+    // Use multiply blend mode for tinting
+    guard let f = CIFilter(name: "CIMultiplyCompositing") else {
+      throw IconicError.ciImageRenderingFailed("CIMultiplyCompositing missing")
+    }
+    f.setValue(colorImage, forKey: kCIInputImageKey)
+    f.setValue(self, forKey: kCIInputBackgroundImageKey)
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Colorize failed")
+    }
+    return out
+  }
+
+  /// Returns a CIImage in which the original alpha is inverted:
+  /// transparent → white, opaque → transparent.
     }
 
     /// Applies motion blur in the downward direction
