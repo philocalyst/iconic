@@ -308,38 +308,37 @@ extension CIImage {
     return out
   }
 
+  /// Scale to fit within `maxSize`, preserve aspect, then apply `ratio`.
+  public func scaled(
+    toFit maxSize: CGSize,
+    ratio: CGFloat = 1
+  ) throws -> CIImage {
+    guard let f = CIFilter(name: "CILanczosScaleTransform") else {
+      throw IconicError.ciImageRenderingFailed("Lanczos missing")
     }
 
-    /// Fills the image with the provided color
-    public func fillColorize(color: CIColor) throws -> CIImage {
-        // 1) Make a solid‐color image the same size as self
-        guard let constantColor = CIFilter(name: "CIConstantColorGenerator") else {
-            throw IconicError.ciFailure("CIConstantColorGenerator missing")
-        }
-        constantColor.setValue(color, forKey: kCIInputColorKey)
-        // the generator is infinite in extent, so crop it to ours
-        guard let colorImage = constantColor.outputImage?.cropped(to: extent) else {
-            throw IconicError.ciFailure("failed to generate color image")
-        }
-
-        // 2) Composite it “source‑in” your original alpha
-        guard let sourceIn = CIFilter(name: "CISourceInCompositing") else {
-            throw IconicError.ciFailure("CISourceInCompositing missing")
-        }
-        sourceIn.setValue(colorImage, forKey: kCIInputImageKey)
-        sourceIn.setValue(self, forKey: kCIInputBackgroundImageKey)
-
-        guard let output = sourceIn.outputImage else {
-            throw IconicError.ciFailure("Colorize compositing failed")
-        }
-
-        // 3) Crop back to the original image’s extent
-        return output.cropped(to: extent)
+    let sz = extent.size
+    // basic scale to fill maxSize preserving aspect
+    let baseScale = min(
+      maxSize.width / sz.width,
+      maxSize.height / sz.height)
+    guard baseScale > 0, ratio > 0 else {
+      throw IconicError.ciImageRenderingFailed("Bad scale or ratio")
     }
 
-    func darken() throws -> CIImage {
-        // Make a solid black CIImage the same size as self
-        let blackBG = CIImage(color: .black).cropped(to: extent)
+    // divide by ratio so ratio>1 makes it smaller
+    let finalScale = baseScale / ratio
+
+    f.setValue(self, forKey: kCIInputImageKey)
+    f.setValue(finalScale, forKey: kCIInputScaleKey)
+    f.setValue(1.0, forKey: kCIInputAspectRatioKey)
+
+    guard let out = f.outputImage else {
+      throw IconicError.ciImageRenderingFailed("Scale failed")
+    }
+    return out
+  }
+
 
         // Apply the darken blend
         return try composite(over: blackBG, filterName: "CIDarkenBlendMode")
